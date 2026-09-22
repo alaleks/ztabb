@@ -4,64 +4,79 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sdl_mod = b.createModule(.{
-        .root_source_file = b.path("src/sdl.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    const mod = struct {
+        fn make(bb: *std.Build, path: []const u8, t: anytype, o: anytype) *std.Build.Module {
+            return bb.createModule(.{
+                .root_source_file = bb.path(path),
+                .target = t,
+                .optimize = o,
+                .link_libc = true,
+            });
+        }
+    }.make;
+
+    const theme_mod = mod(b, "src/theme.zig", target, optimize);
+    const font_mod = mod(b, "src/font.zig", target, optimize);
+    const pty_mod = mod(b, "src/pty.zig", target, optimize);
+    const ssh_mod = mod(b, "src/ssh.zig", target, optimize);
+
+    const sdl_mod = mod(b, "src/sdl.zig", target, optimize);
     sdl_mod.linkSystemLibrary("SDL3", .{});
 
-    const pty_mod = b.createModule(.{
-        .root_source_file = b.path("src/pty.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    const term_mod = mod(b, "src/terminal.zig", target, optimize);
+    term_mod.addImport("theme", theme_mod);
 
-    const term_mod = b.createModule(.{
-        .root_source_file = b.path("src/terminal.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    const highlight_mod = mod(b, "src/highlight.zig", target, optimize);
+    highlight_mod.addImport("theme", theme_mod);
 
-    const tabs_mod = b.createModule(.{
-        .root_source_file = b.path("src/tabs.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    const tabs_mod = mod(b, "src/tabs.zig", target, optimize);
     tabs_mod.addImport("pty", pty_mod);
     tabs_mod.addImport("term", term_mod);
+    tabs_mod.addImport("ssh", ssh_mod);
 
-    const main_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    main_mod.addImport("sdl", sdl_mod);
-    main_mod.addImport("tabs", tabs_mod);
-    main_mod.addImport("term", term_mod);
+    const render_mod = mod(b, "src/render.zig", target, optimize);
+    render_mod.addImport("sdl", sdl_mod);
+    render_mod.addImport("font", font_mod);
+    render_mod.addImport("term", term_mod);
+    render_mod.addImport("theme", theme_mod);
+    render_mod.addImport("highlight", highlight_mod);
+    render_mod.addImport("tabs", tabs_mod);
 
-    const exe = b.addExecutable(.{
-        .name = "ztabb",
-        .root_module = main_mod,
-    });
+    const app_mod = mod(b, "src/app.zig", target, optimize);
+    app_mod.addImport("sdl", sdl_mod);
+    app_mod.addImport("tabs", tabs_mod);
+    app_mod.addImport("term", term_mod);
+    app_mod.addImport("theme", theme_mod);
+    app_mod.addImport("ssh", ssh_mod);
+    app_mod.addImport("render", render_mod);
+    app_mod.addImport("font", font_mod);
+
+    const main_mod = mod(b, "src/main.zig", target, optimize);
+    main_mod.addImport("app", app_mod);
+
+    const exe = b.addExecutable(.{ .name = "ztabb", .root_module = main_mod });
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-    const run_step = b.step("run", "Run ztabb");
-    run_step.dependOn(&run_cmd.step);
+    if (b.args) |args| run_cmd.addArgs(args);
+    b.step("run", "Run ztabb").dependOn(&run_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");
-
-    const term_tests = b.addTest(.{ .root_module = term_mod });
-    test_step.dependOn(&b.addRunArtifact(term_tests).step);
-
-    const pty_tests = b.addTest(.{ .root_module = pty_mod });
-    test_step.dependOn(&b.addRunArtifact(pty_tests).step);
-
-    const tabs_tests = b.addTest(.{ .root_module = tabs_mod });
-    test_step.dependOn(&b.addRunArtifact(tabs_tests).step);
+    const suites = [_]struct { name: []const u8, module: *std.Build.Module }{
+        .{ .name = "theme", .module = theme_mod },
+        .{ .name = "font", .module = font_mod },
+        .{ .name = "terminal", .module = term_mod },
+        .{ .name = "highlight", .module = highlight_mod },
+        .{ .name = "ssh", .module = ssh_mod },
+        .{ .name = "pty", .module = pty_mod },
+        .{ .name = "tabs", .module = tabs_mod },
+        .{ .name = "sdl", .module = sdl_mod },
+        .{ .name = "render", .module = render_mod },
+        .{ .name = "app", .module = app_mod },
+    };
+    for (suites) |s| {
+        const t = b.addTest(.{ .name = s.name, .root_module = s.module });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
 }
