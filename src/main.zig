@@ -66,7 +66,8 @@ pub const App = struct {
     fn processEvents(self: *App) void {
         var event: sdl.Event = undefined;
         while (sdl.pollEvent(&event)) {
-            switch (event.key.type_) {
+            const etype: u32 = @as(*const u32, @ptrCast(&event)).*;
+            switch (etype) {
                 sdl.SDL_EVENT_QUIT => self.running = false,
                 sdl.SDL_EVENT_WINDOW_RESIZED => self.onResize(event.window.data1, event.window.data2),
                 sdl.SDL_EVENT_KEY_DOWN => self.onKeyDown(event.key.key, event.key.modifiers),

@@ -290,6 +290,7 @@ pub const Event = extern union {
     button: MouseButtonEvent,
     motion: MouseMotionEvent,
     wheel: MouseWheelEvent,
+    _pad: [128]u8,
 };
 
 pub fn init() !void {
