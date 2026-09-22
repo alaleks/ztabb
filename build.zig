@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
 
     const theme_mod = mod(b, "src/theme.zig", target, optimize);
     const font_mod = mod(b, "src/font.zig", target, optimize);
+    const icons_mod = mod(b, "src/icons.zig", target, optimize);
     const pty_mod = mod(b, "src/pty.zig", target, optimize);
     const ssh_mod = mod(b, "src/ssh.zig", target, optimize);
 
@@ -37,6 +38,7 @@ pub fn build(b: *std.Build) void {
     const render_mod = mod(b, "src/render.zig", target, optimize);
     render_mod.addImport("sdl", sdl_mod);
     render_mod.addImport("font", font_mod);
+    render_mod.addImport("icons", icons_mod);
     render_mod.addImport("term", term_mod);
     render_mod.addImport("theme", theme_mod);
     render_mod.addImport("highlight", highlight_mod);
@@ -66,6 +68,7 @@ pub fn build(b: *std.Build) void {
     const suites = [_]struct { name: []const u8, module: *std.Build.Module }{
         .{ .name = "theme", .module = theme_mod },
         .{ .name = "font", .module = font_mod },
+        .{ .name = "icons", .module = icons_mod },
         .{ .name = "terminal", .module = term_mod },
         .{ .name = "highlight", .module = highlight_mod },
         .{ .name = "ssh", .module = ssh_mod },

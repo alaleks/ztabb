@@ -12,17 +12,32 @@ const theme = @import("theme");
 
 /// How a cell's colour is chosen. Only 256-colour and truecolor escapes pin a
 /// literal value; everything else defers to the active theme.
-pub const Color = union(enum) {
+/// The tag is pinned to a byte and truecolor is stored as three bytes rather
+/// than a `u24`: a `u24` payload forces the union to 4-byte alignment, which
+/// costs it 8 bytes and every `Cell` 24 -- a size the scrollback then
+/// multiplies by every row it keeps.
+pub const Color = union(enum(u8)) {
     default,
     /// Index into the 256-colour cube; 0-15 come from the theme's ANSI palette.
     indexed: u8,
-    rgb: u24,
+    rgb: [3]u8,
+
+    pub fn fromRgb(v: u24) Color {
+        return .{ .rgb = .{
+            @truncate(v >> 16),
+            @truncate(v >> 8),
+            @truncate(v),
+        } };
+    }
 
     pub fn eql(a: Color, b: Color) bool {
+        // Compare the tags explicitly: `b == .rgb` on a union with a pinned
+        // tag type does not mean "b holds an rgb".
+        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
-            .default => b == .default,
-            .indexed => |x| b == .indexed and b.indexed == x,
-            .rgb => |x| b == .rgb and b.rgb == x,
+            .default => true,
+            .indexed => |x| x == b.indexed,
+            .rgb => |x| std.mem.eql(u8, &x, &b.rgb),
         };
     }
 };
@@ -98,9 +113,11 @@ pub const Terminal = struct {
     alt: ?[]Cell = null,
     alt_saved: SavedCursor = .{},
 
-    /// Ring of scrolled-off rows, `sb_cap` rows of `cols` cells.
-    sb: []Cell,
+    /// Ring of scrolled-off rows. `sb_rows` are allocated and grow on demand up
+    /// to `sb_cap`, so a tab that never scrolls pays nothing for its history.
+    sb: []Cell = &.{},
     sb_cap: u32,
+    sb_rows: u32 = 0,
     sb_head: u32 = 0,
     sb_len: u32 = 0,
     /// Rows the viewport is scrolled back from the live screen.
@@ -129,6 +146,8 @@ pub const Terminal = struct {
     utf8_need: u3 = 0,
 
     pub const DEFAULT_SCROLLBACK: u32 = 2000;
+    /// Rows in the first scrollback allocation; it doubles from there.
+    const SCROLLBACK_SEED: u32 = 128;
 
     pub fn init(gpa: std.mem.Allocator, cols: u32, rows: u32, scrollback_rows: u32) !Terminal {
         const c = @max(cols, 1);
@@ -138,17 +157,12 @@ pub const Terminal = struct {
         errdefer gpa.free(cells);
         @memset(cells, Cell.blank);
 
-        const sb = try gpa.alloc(Cell, c * scrollback_rows);
-        errdefer gpa.free(sb);
-        @memset(sb, Cell.blank);
-
         return .{
             .gpa = gpa,
             .cols = c,
             .rows = r,
             .cells = cells,
             .scroll_bot = r - 1,
-            .sb = sb,
             .sb_cap = scrollback_rows,
         };
     }
@@ -192,11 +206,7 @@ pub const Terminal = struct {
         } else null;
         errdefer if (new_alt) |a| self.gpa.free(a);
 
-        const new_sb: ?[]Cell = if (c != self.cols) blk: {
-            const sb = try self.gpa.alloc(Cell, c * self.sb_cap);
-            @memset(sb, Cell.blank);
-            break :blk sb;
-        } else null;
+        const drop_history = c != self.cols and self.sb_rows > 0;
 
         const copy_rows = @min(self.rows, r);
         const copy_cols = @min(self.cols, c);
@@ -209,11 +219,13 @@ pub const Terminal = struct {
             self.gpa.free(self.alt.?);
             self.alt = a;
         }
-        if (new_sb) |sb| {
+        if (drop_history) {
             // Stored rows are indexed by width, so a width change invalidates
-            // the whole history.
+            // the whole history. Release it rather than re-reserving: it grows
+            // back on demand.
             self.gpa.free(self.sb);
-            self.sb = sb;
+            self.sb = &.{};
+            self.sb_rows = 0;
             self.sb_head = 0;
             self.sb_len = 0;
             self.view_offset = 0;
@@ -233,12 +245,38 @@ pub const Terminal = struct {
 
     // -- scrollback --------------------------------------------------------
 
+    /// Doubles the history ring, up to `sb_cap`. Rows are re-laid oldest-first
+    /// so the ring stays in order across the move.
+    fn growScrollback(self: *Terminal) void {
+        const want = @min(
+            if (self.sb_rows == 0) SCROLLBACK_SEED else self.sb_rows * 2,
+            self.sb_cap,
+        );
+        if (want <= self.sb_rows) return;
+
+        const new = self.gpa.alloc(Cell, @as(usize, want) * self.cols) catch return;
+        @memset(new, Cell.blank);
+        for (0..self.sb_len) |i| {
+            const slot = (self.sb_head + self.sb_rows - self.sb_len + i) % self.sb_rows;
+            @memcpy(
+                new[i * self.cols ..][0..self.cols],
+                self.sb[@as(usize, slot) * self.cols ..][0..self.cols],
+            );
+        }
+        self.gpa.free(self.sb);
+        self.sb = new;
+        self.sb_rows = want;
+        self.sb_head = self.sb_len;
+    }
+
     fn pushScrollback(self: *Terminal, row: u32) void {
         if (self.sb_cap == 0 or self.alt != null) return;
+        if (self.sb_len == self.sb_rows) self.growScrollback();
+        if (self.sb_rows == 0) return; // growth failed; drop the row
         const dst = @as(usize, self.sb_head) * self.cols;
         @memcpy(self.sb[dst..][0..self.cols], self.cells[self.idx(row, 0)..][0..self.cols]);
-        self.sb_head = (self.sb_head + 1) % self.sb_cap;
-        if (self.sb_len < self.sb_cap) self.sb_len += 1;
+        self.sb_head = (self.sb_head + 1) % self.sb_rows;
+        if (self.sb_len < self.sb_rows) self.sb_len += 1;
         // Keep the viewport anchored to the same text while it is scrolled back.
         if (self.view_offset > 0 and self.view_offset < self.sb_len) self.view_offset += 1;
     }
@@ -246,7 +284,7 @@ pub const Terminal = struct {
     /// Row `n` rows above the live screen top; null once past the history.
     pub fn scrollbackRow(self: *const Terminal, n: u32) ?[]const Cell {
         if (n == 0 or n > self.sb_len) return null;
-        const slot = (self.sb_head + self.sb_cap - n) % self.sb_cap;
+        const slot = (self.sb_head + self.sb_rows - n) % self.sb_rows;
         return self.sb[@as(usize, slot) * self.cols ..][0..self.cols];
     }
 
@@ -517,7 +555,7 @@ pub const Terminal = struct {
     fn resolveColor(c: Color, th: *const theme.Theme, fallback: u32) u32 {
         return switch (c) {
             .default => fallback,
-            .rgb => |v| @intCast(v),
+            .rgb => |v| (@as(u32, v[0]) << 16) | (@as(u32, v[1]) << 8) | v[2],
             .indexed => |i| xterm256(i, th),
         };
     }
@@ -852,11 +890,13 @@ pub const Terminal = struct {
                     i.* = self.param_count;
                     return null;
                 }
-                const r: u24 = @intCast(@min(self.params[i.* + 2], 255));
-                const g: u24 = @intCast(@min(self.params[i.* + 3], 255));
-                const b: u24 = @intCast(@min(self.params[i.* + 4], 255));
+                const rgb = [3]u8{
+                    @intCast(@min(self.params[i.* + 2], 255)),
+                    @intCast(@min(self.params[i.* + 3], 255)),
+                    @intCast(@min(self.params[i.* + 4], 255)),
+                };
                 i.* += 4;
-                return .{ .rgb = (r << 16) | (g << 8) | b };
+                return .{ .rgb = rgb };
             },
             5 => { // 38;5;N
                 if (i.* + 2 >= self.param_count) {
@@ -938,6 +978,66 @@ fn rowText(t: *const Terminal, row: u32, buf: []u8) []const u8 {
         n += std.unicode.utf8Encode(cp, buf[n..]) catch 0;
     }
     return std.mem.trimEnd(u8, buf[0..n], " ");
+}
+
+test "a Cell stays small enough for a long history" {
+    // The scrollback multiplies this by every stored row, so a regression here
+    // costs megabytes per tab.
+    try testing.expect(@sizeOf(Cell) <= 16);
+    try testing.expect(@sizeOf(Color) <= 4);
+}
+
+test "a tab that never scrolls allocates no history" {
+    var t = try testTerm(80, 24);
+    defer t.deinit();
+    try testing.expectEqual(@as(usize, 0), t.sb.len);
+    try testing.expectEqual(@as(u32, 0), t.sb_rows);
+
+    // Writing without overflowing the screen must not reserve anything.
+    t.write("hello\r\nworld");
+    try testing.expectEqual(@as(usize, 0), t.sb.len);
+}
+
+test "history grows on demand and stops at the cap" {
+    var t = try Terminal.init(testing.allocator, 4, 1, 300);
+    defer t.deinit();
+    for (0..40) |_| t.write("x\r\n");
+    try testing.expect(t.sb_rows > 0);
+    try testing.expect(t.sb_rows <= 300);
+    const grown_once = t.sb_rows;
+
+    for (0..400) |_| t.write("y\r\n");
+    try testing.expectEqual(@as(u32, 300), t.sb_rows);
+    try testing.expectEqual(@as(u32, 300), t.sb_len);
+    try testing.expect(t.sb_rows > grown_once);
+}
+
+test "growing the history keeps the rows in order" {
+    var t = try Terminal.init(testing.allocator, 4, 1, 400);
+    defer t.deinit();
+    // Enough lines to cross at least one growth step.
+    for (0..200) |i| {
+        var buf: [8]u8 = undefined;
+        t.write(std.fmt.bufPrint(&buf, "{d}\r\n", .{i % 10}) catch unreachable);
+    }
+    // The most recent scrolled-off row must be the one written just before it.
+    const last = t.scrollbackRow(1).?;
+    const prev = t.scrollbackRow(2).?;
+    try testing.expectEqual(@as(u21, '9'), last[0].ch);
+    try testing.expectEqual(@as(u21, '8'), prev[0].ch);
+}
+
+test "a width change releases the history instead of re-reserving it" {
+    var t = try testTerm(5, 2);
+    defer t.deinit();
+    t.write("aaa\r\nbbb\r\nccc");
+    try testing.expect(t.sb_rows > 0);
+    try t.resize(9, 2);
+    try testing.expectEqual(@as(u32, 0), t.sb_rows);
+    try testing.expectEqual(@as(usize, 0), t.sb.len);
+    // It comes back on demand.
+    t.write("\r\nddd\r\neee");
+    try testing.expect(t.sb_rows > 0);
 }
 
 test "init clears the grid and sets a full-screen scroll region" {
@@ -1273,10 +1373,10 @@ test "SGR colours: basic, bright, 256 and truecolor" {
     try testing.expect(t.cellAt(0, 2).fg.eql(.{ .indexed = 208 }));
 
     t.write("\x1b[38;2;255;128;0mD");
-    try testing.expect(t.cellAt(0, 3).fg.eql(.{ .rgb = 0xFF8000 }));
+    try testing.expect(t.cellAt(0, 3).fg.eql(Color.fromRgb(0xFF8000)));
 
     t.write("\x1b[48;2;1;2;3mE");
-    try testing.expect(t.cellAt(0, 4).bg.eql(.{ .rgb = 0x010203 }));
+    try testing.expect(t.cellAt(0, 4).bg.eql(Color.fromRgb(0x010203)));
 
     t.write("\x1b[39;49mF");
     try testing.expect(t.cellAt(0, 5).fg.eql(.default));

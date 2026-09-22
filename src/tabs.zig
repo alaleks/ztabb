@@ -19,12 +19,38 @@ pub const Tab = struct {
     label: [MAX_LABEL]u8,
     label_len: usize,
 
-    /// What the tab bar shows: the program's own title if it set one, else the
-    /// name the tab was opened with.
-    pub fn displayName(self: *const Tab) []const u8 {
-        const title = self.terminal.titleSlice();
-        if (title.len > 0) return title[0..@min(title.len, MAX_LABEL)];
+    /// The name the tab was opened under: the ssh profile, or the shell.
+    ///
+    /// For an ssh tab this always wins over the window title: the remote shell
+    /// sets the title to something like `user@host:~`, which buries the
+    /// profile the connection was actually opened with.
+    pub fn profileName(self: *const Tab) []const u8 {
         return self.label[0..self.label_len];
+    }
+
+    /// The working directory's last component, taken from the window title the
+    /// shell sets. Empty when the title carries no path.
+    pub fn folderName(self: *const Tab) []const u8 {
+        return folderOf(self.terminal.titleSlice());
+    }
+
+    /// What the tab bar shows.
+    ///
+    /// An ssh tab leads with its profile and appends the folder when it fits;
+    /// a shell tab shows the folder it is sitting in, falling back to the
+    /// shell's name before it has set a title.
+    pub fn displayName(self: *const Tab, buf: []u8) []const u8 {
+        const folder = self.folderName();
+        if (self.kind != .ssh) {
+            if (folder.len > 0) return folder;
+            const title = self.terminal.titleSlice();
+            if (title.len > 0) return title[0..@min(title.len, MAX_LABEL)];
+            return self.profileName();
+        }
+
+        const profile = self.profileName();
+        if (folder.len == 0) return profile;
+        return std.fmt.bufPrint(buf, "{s} {s}", .{ profile, folder }) catch profile;
     }
 
     fn setLabel(self: *Tab, name: []const u8) void {
@@ -33,6 +59,30 @@ pub const Tab = struct {
         self.label_len = n;
     }
 };
+
+/// The last path component of a window title such as `user@host:~/src/app`,
+/// `~/src/app` or `app — zsh`. Empty when nothing path-like is in there.
+pub fn folderOf(title: []const u8) []const u8 {
+    var s = std.mem.trim(u8, title, " \t");
+    if (s.len == 0) return "";
+
+    // Some shells append the program name after a dash; drop that first.
+    for ([_][]const u8{ " \u{2014} ", " - " }) |sep| {
+        if (std.mem.indexOf(u8, s, sep)) |at| s = std.mem.trim(u8, s[0..at], " ");
+    }
+    // `user@host:path` -- keep the path.
+    if (std.mem.lastIndexOfScalar(u8, s, ':')) |at| s = s[at + 1 ..];
+    if (s.len == 0) return "";
+    // A title that is not a path at all (`vim`, `htop`) is left as it is.
+    if (std.mem.indexOfScalar(u8, s, '/') == null) return s;
+
+    // Trailing slashes name the same directory as the component before them.
+    while (s.len > 1 and s[s.len - 1] == '/') s = s[0 .. s.len - 1];
+    if (std.mem.eql(u8, s, "/")) return "/";
+    const at = std.mem.lastIndexOfScalar(u8, s, '/').?;
+    const base = s[at + 1 ..];
+    return if (base.len > 0) base else s;
+}
 
 pub const Error = error{ TooManyTabs, InvalidIndex, NoTabs } ||
     pty.SpawnError || std.mem.Allocator.Error;
@@ -293,7 +343,8 @@ test "closing a middle tab keeps focus on the same position" {
     try testing.expectEqual(@as(usize, 2), tabs.count);
     // "c" slid into slot 1 and keeps the focus.
     try testing.expectEqual(@as(usize, 1), tabs.active_idx);
-    try testing.expectEqualStrings("c", tabs.active().?.displayName());
+    var name_buf: [MAX_LABEL * 2]u8 = undefined;
+    try testing.expectEqualStrings("c", tabs.active().?.displayName(&name_buf));
 }
 
 test "closing the active last tab moves focus left" {
@@ -304,7 +355,8 @@ test "closing the active last tab moves focus left" {
     try tabs.switchTo(1);
     try tabs.closeTab(1);
     try testing.expectEqual(@as(usize, 0), tabs.active_idx);
-    try testing.expectEqualStrings("a", tabs.active().?.displayName());
+    var name_buf: [MAX_LABEL * 2]u8 = undefined;
+    try testing.expectEqualStrings("a", tabs.active().?.displayName(&name_buf));
 }
 
 test "closing a tab before the active one shifts the index down" {
@@ -316,7 +368,8 @@ test "closing a tab before the active one shifts the index down" {
     try tabs.switchTo(2);
     try tabs.closeTab(0);
     try testing.expectEqual(@as(usize, 1), tabs.active_idx);
-    try testing.expectEqualStrings("c", tabs.active().?.displayName());
+    var name_buf: [MAX_LABEL * 2]u8 = undefined;
+    try testing.expectEqualStrings("c", tabs.active().?.displayName(&name_buf));
 }
 
 test "closeTab rejects an out-of-range index" {
@@ -356,16 +409,58 @@ test "a tab is labelled by how it was opened" {
     var tabs = Tabs.init(testing.allocator);
     defer tabs.deinit();
     _ = try addTestTab(&tabs, "zsh", 80, 24);
-    try testing.expectEqualStrings("zsh", tabs.active().?.displayName());
+    var name_buf: [MAX_LABEL * 2]u8 = undefined;
+    try testing.expectEqualStrings("zsh", tabs.active().?.displayName(&name_buf));
 }
 
-test "an OSC title overrides the tab label" {
+test "a shell tab shows the folder it is sitting in" {
     var tabs = Tabs.init(testing.allocator);
     defer tabs.deinit();
     _ = try addTestTab(&tabs, "zsh", 80, 24);
     const tab = tabs.active().?;
+    var name_buf: [MAX_LABEL * 2]u8 = undefined;
+
     tab.terminal.write("\x1b]0;~/projects/ztabb\x07");
-    try testing.expectEqualStrings("~/projects/ztabb", tab.displayName());
+    try testing.expectEqualStrings("ztabb", tab.displayName(&name_buf));
+}
+
+test "an ssh tab keeps showing its profile" {
+    // The remote shell sets the title to user@host:~, which used to replace
+    // the profile and leave no sign of which connection the tab was.
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "prod", 80, 24);
+    const tab = tabs.active().?;
+    tab.kind = .ssh;
+    var name_buf: [MAX_LABEL * 2]u8 = undefined;
+
+    try testing.expectEqualStrings("prod", tab.displayName(&name_buf));
+
+    tab.terminal.write("\x1b]0;deploy@prod.example.com:~/app\x07");
+    try testing.expectEqualStrings("prod app", tab.displayName(&name_buf));
+    try testing.expectEqualStrings("prod", tab.profileName());
+    try testing.expectEqualStrings("app", tab.folderName());
+}
+
+test "folderOf pulls the last component out of a window title" {
+    try testing.expectEqualStrings("ztabb", folderOf("~/projects/ztabb"));
+    try testing.expectEqualStrings("app", folderOf("deploy@prod:~/srv/app"));
+    try testing.expectEqualStrings("ztabb", folderOf("~/projects/ztabb/"));
+    try testing.expectEqualStrings("/", folderOf("/"));
+    try testing.expectEqualStrings("~", folderOf("~"));
+    try testing.expectEqualStrings("etc", folderOf("/etc"));
+}
+
+test "folderOf leaves a title that is not a path alone" {
+    try testing.expectEqualStrings("vim", folderOf("vim"));
+    try testing.expectEqualStrings("htop", folderOf("htop"));
+    try testing.expectEqualStrings("", folderOf(""));
+    try testing.expectEqualStrings("", folderOf("   "));
+}
+
+test "folderOf drops a trailing program name" {
+    try testing.expectEqualStrings("ztabb", folderOf("~/src/ztabb \u{2014} zsh"));
+    try testing.expectEqualStrings("ztabb", folderOf("~/src/ztabb - bash"));
 }
 
 test "an over-long label is truncated" {
@@ -373,7 +468,8 @@ test "an over-long label is truncated" {
     defer tabs.deinit();
     const long = "n" ** (MAX_LABEL * 2);
     _ = try addTestTab(&tabs, long, 80, 24);
-    try testing.expectEqual(MAX_LABEL, tabs.active().?.displayName().len);
+    var name_buf: [MAX_LABEL * 2]u8 = undefined;
+    try testing.expectEqual(MAX_LABEL, tabs.active().?.displayName(&name_buf).len);
 }
 
 test "pty output reaches the tab's screen" {
@@ -441,7 +537,8 @@ test "reapExited closes tabs whose child is gone" {
         sleepMs(1);
     }
     try testing.expectEqual(@as(usize, 1), tabs.count);
-    try testing.expectEqualStrings("stays", tabs.active().?.displayName());
+    var name_buf: [MAX_LABEL * 2]u8 = undefined;
+    try testing.expectEqualStrings("stays", tabs.active().?.displayName(&name_buf));
 }
 
 test "resizeAll resizes every tab, not only the focused one" {

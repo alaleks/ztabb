@@ -21,12 +21,29 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { int w, h; } Cell;
+// Weight bits. Menlo ships Regular and Bold only, so `medium` (weight 500) is
+// synthesized by stroking the regular outline: controllable, and closer to 500
+// than either real face.
+#define W_REGULAR 1
+#define W_BOLD    2
+#define W_MEDIUM  4
 
-// 1x for a standard display, 2x for HiDPI. Ordered small to large; font.zig
-// picks the largest set that still fits the cell it is drawing.
-static const Cell cells[] = {{8, 16}, {16, 32}};
+typedef struct { int w, h; int weights; } Cell;
+
+// Terminal cells at 1x and 2x, plus the smaller sizes the tab bar and dialogs
+// set their labels in. font.zig picks the largest set that fits the box it is
+// drawing into.
+static const Cell cells[] = {
+    {6, 12, W_MEDIUM},            // UI text, 1x
+    {8, 16, W_REGULAR | W_BOLD},  // terminal, 1x
+    {12, 24, W_MEDIUM},           // UI text, 2x
+    {16, 32, W_REGULAR | W_BOLD}, // terminal, 2x
+};
 #define NCELLS ((int)(sizeof(cells) / sizeof(cells[0])))
+
+static const char *weight_name(int bit) {
+    return bit == W_REGULAR ? "regular" : bit == W_BOLD ? "bold" : "medium";
+}
 
 typedef struct { unsigned int lo, hi; } Range;
 
@@ -51,19 +68,22 @@ static int blockGlyph(unsigned int cp, int w, int h, unsigned char *out) {
     if (cp < 0x2580 || cp > 0x259F) return 0;
     memset(out, 0, (size_t)w * h);
 
-    int eighth_w = w / 8, eighth_h = h / 8;
+    // Proportional, not integer eighths: at 12 rows `h / 8` is 1, so eight of
+    // them cover two thirds of the cell instead of all of it.
+    #define EIGHTH_H(n) ((h) * (n) / 8)
+    #define EIGHTH_W(n) ((w) * (n) / 8)
     #define FILL(x0, y0, x1, y1)                                    \
         for (int y = (y0); y < (y1); y++)                           \
             for (int x = (x0); x < (x1); x++) out[y * w + x] = 255
 
     if (cp == 0x2580) { FILL(0, 0, w, h / 2); return 1; }
     if (cp >= 0x2581 && cp <= 0x2588) {          // lower 1/8 .. full block
-        int rows = (int)(cp - 0x2580) * eighth_h;
+        int rows = EIGHTH_H((int)(cp - 0x2580));
         FILL(0, h - rows, w, h);
         return 1;
     }
     if (cp >= 0x2589 && cp <= 0x258F) {          // left 7/8 .. left 1/8
-        int cols = (8 - (int)(cp - 0x2588)) * eighth_w;
+        int cols = EIGHTH_W(8 - (int)(cp - 0x2588));
         FILL(0, 0, cols, h);
         return 1;
     }
@@ -75,8 +95,12 @@ static int blockGlyph(unsigned int cp, int w, int h, unsigned char *out) {
         memset(out, v, (size_t)w * h);
         return 1;
     }
-    if (cp == 0x2594) { FILL(0, 0, w, eighth_h); return 1; }
-    if (cp == 0x2595) { FILL(w - eighth_w, 0, w, h); return 1; }
+    if (cp == 0x2594) { FILL(0, 0, w, EIGHTH_H(1) > 0 ? EIGHTH_H(1) : 1); return 1; }
+    if (cp == 0x2595) {
+        int c = EIGHTH_W(1) > 0 ? EIGHTH_W(1) : 1;
+        FILL(w - c, 0, w, h);
+        return 1;
+    }
 
     // 0x2596..0x259F: quadrants. Bit 0 = upper-left, 1 = upper-right,
     // 2 = lower-left, 3 = lower-right.
@@ -89,6 +113,8 @@ static int blockGlyph(unsigned int cp, int w, int h, unsigned char *out) {
     if (q & 0x4) { FILL(0, h / 2, w / 2, h); }
     if (q & 0x8) { FILL(w / 2, h / 2, w, h); }
     #undef FILL
+    #undef EIGHTH_H
+    #undef EIGHTH_W
     return 1;
 }
 
@@ -232,7 +258,7 @@ static double sizeForAdvance(const char *name, double target) {
 /// Rasterizes one codepoint into `w`x`h` 8-bit coverage. Returns 0 when the
 /// face has no glyph for it.
 static int rasterize(CTFontRef font, unsigned int cp, int w, int h,
-                     double baseline, unsigned char *out) {
+                     double baseline, double embolden, unsigned char *out) {
     UniChar chars[2];
     CFIndex nchars = 1;
     if (cp < 0x10000) {
@@ -286,6 +312,13 @@ static int rasterize(CTFontRef font, unsigned int cp, int w, int h,
     CGContextSetGrayFillColor(ctx, 0.0, 1.0);
     CGContextFillRect(ctx, CGRectMake(0, 0, w, h));
     CGContextSetGrayFillColor(ctx, 1.0, 1.0);
+    if (embolden > 0) {
+        // Fill plus a hairline stroke in the same colour: the usual way to
+        // lift a face one weight step when there is no real face to draw from.
+        CGContextSetGrayStrokeColor(ctx, 1.0, 1.0);
+        CGContextSetLineWidth(ctx, embolden);
+        CGContextSetTextDrawingMode(ctx, kCGTextFillStroke);
+    }
     CGContextSetShouldAntialias(ctx, true);
     CGContextSetShouldSmoothFonts(ctx, false); // grayscale AA, not subpixel
     CGContextSetAllowsFontSubpixelPositioning(ctx, true);
@@ -335,10 +368,10 @@ int main(int argc, char **argv) {
     int total = 0;
     for (int i = 0; i < nranges; i++) total += (int)(ranges[i].hi - ranges[i].lo + 1);
 
-    const char *names[2] = {"Menlo-Regular", "Menlo-Bold"};
+    static const char *names[2] = {"Menlo-Regular", "Menlo-Bold"};
 
     if (argc > 1) {
-        int w = cells[0].w, h = cells[0].h;
+        int w = cells[1].w, h = cells[1].h;
         double size = sizeForAdvance(names[0], w);
         CTFontRef f = makeFont(names[0], size);
         double asc = CTFontGetAscent(f), desc = CTFontGetDescent(f);
@@ -347,7 +380,7 @@ int main(int argc, char **argv) {
         for (int i = 1; i < argc; i++) {
             unsigned int cp = (unsigned int)strtol(argv[i], NULL, 0);
             if (!blockGlyph(cp, w, h, g) && !powerlineGlyph(cp, w, h, g)) {
-                if (rasterize(f, cp, w, h, baseline, g)) boostContrast(g, w * h);
+                if (rasterize(f, cp, w, h, baseline, 0, g)) boostContrast(g, w * h);
             }
             dump(g, w, h, cp);
         }
@@ -360,28 +393,40 @@ int main(int argc, char **argv) {
     if (!dat) { perror("src/font.dat"); return 1; }
 
     long offset = 0;
-    struct { long offset; int w, h; } meta[NCELLS];
+    struct { long offset; int w, h, weight; } sections[NCELLS * 3];
+    int nsections = 0;
 
     for (int c = 0; c < NCELLS; c++) {
         int w = cells[c].w, h = cells[c].h;
-        meta[c].offset = offset;
-        meta[c].w = w;
-        meta[c].h = h;
-
         unsigned char *g = malloc((size_t)w * h);
-        for (int f = 0; f < 2; f++) {
-            double size = sizeForAdvance(names[f], w);
-            CTFontRef font = makeFont(names[f], size);
+
+        for (int bit = W_REGULAR; bit <= W_MEDIUM; bit <<= 1) {
+            if (!(cells[c].weights & bit)) continue;
+
+            // Medium is Menlo-Regular with a hairline stroke; the stroke is a
+            // fraction of the cell so it scales with the size. Tuned so the result
+            // lands between the regular and bold faces rather than beside bold.
+            const char *face = (bit == W_BOLD) ? names[1] : names[0];
+            double embolden = (bit == W_MEDIUM) ? w * 0.020 : 0.0;
+
+            double size = sizeForAdvance(face, w);
+            CTFontRef font = makeFont(face, size);
             CTFontRef fallback = makeFont(names[0], sizeForAdvance(names[0], w));
-            if (!font) { fprintf(stderr, "%s not found\n", names[f]); return 1; }
+            if (!font) { fprintf(stderr, "%s not found\n", face); return 1; }
             double asc = CTFontGetAscent(font), desc = CTFontGetDescent(font);
             double baseline = (h - (asc + desc)) / 2.0 + desc;
+
+            sections[nsections].offset = offset;
+            sections[nsections].w = w;
+            sections[nsections].h = h;
+            sections[nsections].weight = bit;
+            nsections++;
 
             int missing = 0;
             for (int i = 0; i < nranges; i++) {
                 for (unsigned int cp = ranges[i].lo; cp <= ranges[i].hi; cp++) {
                     if (blockGlyph(cp, w, h, g) || powerlineGlyph(cp, w, h, g)) {
-                        if (f == 1 && cp >= 0xE0A0 && cp <= 0xE0A2) {
+                        if (bit == W_BOLD && cp >= 0xE0A0 && cp <= 0xE0A2) {
                             // Embolden the pictograms; the separators must stay
                             // exact so they still tile.
                             for (int y = 0; y < h; y++)
@@ -393,17 +438,16 @@ int main(int argc, char **argv) {
                         offset += w * h;
                         continue;
                     }
-                    if (rasterize(font, cp, w, h, baseline, g)) {
+                    if (rasterize(font, cp, w, h, baseline, embolden, g)) {
                         boostContrast(g, w * h);
-                    } else if (f == 1 && rasterize(fallback, cp, w, h, baseline, g)) {
-                        // Menlo-Bold lacks many box-drawing glyphs; embolden the
-                        // regular outline rather than dropping the character.
+                    } else if (bit != W_REGULAR &&
+                               rasterize(fallback, cp, w, h, baseline, embolden, g)) {
                         boostContrast(g, w * h);
-                        for (int y = 0; y < h; y++) {
-                            for (int x = w - 1; x > 0; x--) {
-                                unsigned char l = g[y * w + x - 1];
-                                if (l > g[y * w + x]) g[y * w + x] = l;
-                            }
+                        if (bit == W_BOLD) {
+                            for (int y = 0; y < h; y++)
+                                for (int x = w - 1; x > 0; x--)
+                                    if (g[y * w + x - 1] > g[y * w + x])
+                                        g[y * w + x] = g[y * w + x - 1];
                         }
                     } else {
                         memset(g, 0, (size_t)w * h);
@@ -413,7 +457,8 @@ int main(int argc, char **argv) {
                     offset += w * h;
                 }
             }
-            fprintf(stderr, "%dx%d %s: %d/%d blank\n", w, h, names[f], missing, total);
+            fprintf(stderr, "%dx%d %-8s: %d/%d blank\n",
+                    w, h, weight_name(bit), missing, total);
             CFRelease(font);
             CFRelease(fallback);
         }
@@ -424,17 +469,18 @@ int main(int argc, char **argv) {
     FILE *out = fopen("src/font_data.zig", "w");
     if (!out) { perror("src/font_data.zig"); return 1; }
     fprintf(out, "// Generated by tools/genfont.c -- do not edit by hand.\n");
-    fprintf(out, "// Glyph coverage lives in font.dat: %d glyphs per weight,\n", total);
-    fprintf(out, "// two weights per size, one byte per pixel.\n\n");
+    fprintf(out, "// Glyph coverage lives in font.dat: %d glyphs per section,\n", total);
+    fprintf(out, "// one byte per pixel, sections listed below.\n\n");
     fprintf(out, "pub const glyph_count: usize = %d;\n\n", total);
-    fprintf(out, "pub const Size = struct {\n");
-    fprintf(out, "    w: u32,\n    h: u32,\n");
-    fprintf(out, "    /// Byte offset of the regular weight within font.dat.\n");
-    fprintf(out, "    offset: usize,\n};\n\n");
-    fprintf(out, "pub const sizes = [_]Size{\n");
-    for (int c = 0; c < NCELLS; c++) {
-        fprintf(out, "    .{ .w = %d, .h = %d, .offset = %ld },\n",
-                meta[c].w, meta[c].h, meta[c].offset);
+    fprintf(out, "/// 0 = regular, 1 = bold, 2 = medium.\n");
+    fprintf(out, "pub const Section = struct {\n");
+    fprintf(out, "    w: u32,\n    h: u32,\n    weight: u8,\n    offset: usize,\n};\n\n");
+    fprintf(out, "pub const sections = [_]Section{\n");
+    for (int i = 0; i < nsections; i++) {
+        int wi = sections[i].weight == W_REGULAR ? 0
+               : sections[i].weight == W_BOLD ? 1 : 2;
+        fprintf(out, "    .{ .w = %d, .h = %d, .weight = %d, .offset = %ld },\n",
+                sections[i].w, sections[i].h, wi, sections[i].offset);
     }
     fprintf(out, "};\n\n");
     fprintf(out, "pub const Range = struct { lo: u21, hi: u21, base: u16 };\n\n");

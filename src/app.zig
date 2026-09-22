@@ -11,10 +11,39 @@ const font = @import("font");
 
 const log = std.log.scoped(.ztabb);
 
-/// Idle wait between frames when nothing is happening, in milliseconds. Short
-/// enough to feel instant, long enough that an idle window costs ~0% CPU.
-const IDLE_MS: i32 = 16;
 const TOAST_MS: u64 = 2200;
+
+/// How long to block waiting for the next event, given how long the window has
+/// been quiet.
+///
+/// pty output is not an SDL event, so the loop has to come back and poll for
+/// it; the wait is the ceiling on how late that output can appear. Holding it
+/// at one frame forever costs ~60 wakeups a second in a window that is just
+/// sitting at a prompt, so it backs off once nothing has happened for a while
+/// and snaps back the moment it does.
+pub const IdlePacer = struct {
+    /// Milliseconds of quiet before each step.
+    const SNAPPY_MS: i32 = 2;
+    const FRAME_MS: i32 = 16;
+    const RELAXED_MS: i32 = 50;
+    const IDLE_MS: i32 = 120;
+
+    quiet_since: u64 = 0,
+
+    pub fn activity(self: *IdlePacer, now: u64) void {
+        self.quiet_since = now;
+    }
+
+    pub fn waitMs(self: *const IdlePacer, now: u64) i32 {
+        const quiet = now -| self.quiet_since;
+        // Just after a keystroke, poll hard: this is the window in which the
+        // shell echoes and the user is watching for it.
+        if (quiet < 120) return SNAPPY_MS;
+        if (quiet < 600) return FRAME_MS;
+        if (quiet < 3000) return RELAXED_MS;
+        return IDLE_MS;
+    }
+};
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -36,21 +65,23 @@ pub const App = struct {
     rows: u32 = 24,
 
     running: bool = true,
-    /// Set when a key press already produced the bytes for a character, so the
-    /// TEXT_INPUT event that follows must not send them a second time.
-    swallow_text: bool = false,
+    text_gate: TextGate = .{},
     /// Something outside the terminal grid changed and the window must be
     /// redrawn even though no pty produced output.
     ui_dirty: bool = true,
     /// The title last handed to SDL, so it is not reset every frame.
     title_buf: [tabs_mod.MAX_LABEL + 16:0]u8 = [_:0]u8{0} ** (tabs_mod.MAX_LABEL + 16),
 
+    pacer: IdlePacer = .{},
     picker: ?Picker = null,
+    picker_rows: [ssh.MAX_HOSTS]rnd.HostRow = undefined,
     toast: ?Toast = null,
 
+    /// The host list is bounded, so it lives in the app rather than being
+    /// allocated and freed every time the picker opens.
     const Picker = struct {
         selected: usize = 0,
-        rows: []rnd.HostRow,
+        count: usize = 0,
     };
 
     const Toast = struct {
@@ -104,7 +135,6 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        if (self.picker) |p| self.gpa.free(p.rows);
         self.tabs.deinit();
         self.hosts.deinit();
         const r = self.renderer.r;
@@ -167,10 +197,17 @@ pub const App = struct {
             self.expireToast();
             self.render();
 
-            // Nothing moving: block briefly instead of spinning.
-            if (!had_input and !had_output) {
-                var event: sdl.Event = undefined;
-                if (sdl.waitEventTimeout(&event, IDLE_MS)) self.handleEvent(&event);
+            const now = sdl.ticks();
+            if (had_input or had_output) {
+                self.pacer.activity(now);
+                continue;
+            }
+            // Nothing moving: block instead of spinning. The wait returns the
+            // instant an SDL event arrives, so input stays immediate either way.
+            var event: sdl.Event = undefined;
+            if (sdl.waitEventTimeout(&event, self.pacer.waitMs(now))) {
+                self.handleEvent(&event);
+                self.pacer.activity(sdl.ticks());
             }
         }
     }
@@ -204,6 +241,8 @@ pub const App = struct {
     fn onKeyDown(self: *App, ev: sdl.KeyboardEvent) void {
         const mods = ev.mod;
         const key = ev.key;
+        // Only the press in flight may claim the text event that follows it.
+        self.text_gate.keyPressed();
 
         if (self.picker != null) {
             self.pickerKey(key);
@@ -212,7 +251,7 @@ pub const App = struct {
 
         if (shortcutFor(key, mods)) |action| {
             self.run_action(action);
-            self.swallow_text = true;
+            self.text_gate.claim();
             return;
         }
 
@@ -239,7 +278,7 @@ pub const App = struct {
         const bytes = encodeKey(key, mods, &buf) orelse return;
         if (bytes.len == 0) return;
         // A key that produced its own bytes must not also arrive as text.
-        self.swallow_text = true;
+        self.text_gate.claim();
         tab.pty.write(bytes) catch {};
     }
 
@@ -281,10 +320,7 @@ pub const App = struct {
     }
 
     fn onTextInput(self: *App, ev: sdl.TextInputEvent) void {
-        if (self.swallow_text) {
-            self.swallow_text = false;
-            return;
-        }
+        if (self.text_gate.consumeText()) return;
         if (self.picker != null) return;
         const text = ev.text orelse return;
         const tab = self.tabs.active() orelse return;
@@ -303,7 +339,7 @@ pub const App = struct {
 
         if (self.picker) |p| {
             const layout = self.renderer.picker(
-                p.rows.len,
+                p.count,
                 @floatFromInt(self.win_w),
                 @floatFromInt(self.win_h),
             );
@@ -395,21 +431,23 @@ pub const App = struct {
         var usable: [ssh.MAX_HOSTS]ssh.Host = undefined;
         const hosts = self.hosts.connectable(&usable);
 
-        const rows = self.gpa.alloc(rnd.HostRow, hosts.len) catch return;
         for (hosts, 0..) |h, i| {
-            rows[i] = .{
+            self.picker_rows[i] = .{
                 .alias = h.alias,
                 // The arena backing these strings outlives the picker.
                 .detail = if (h.hostname.len > 0) h.hostname else h.user,
             };
         }
-        self.picker = .{ .rows = rows };
-        if (rows.len == 0) self.showToast("no hosts in ~/.ssh/config", .{});
+        self.picker = .{ .count = hosts.len };
+        if (hosts.len == 0) self.showToast("no hosts in ~/.ssh/config", .{});
+    }
+
+    fn pickerRows(self: *const App) []const rnd.HostRow {
+        const p = self.picker orelse return &.{};
+        return self.picker_rows[0..p.count];
     }
 
     fn closePicker(self: *App) void {
-        const p = self.picker orelse return;
-        self.gpa.free(p.rows);
         self.picker = null;
     }
 
@@ -418,17 +456,15 @@ pub const App = struct {
         switch (key) {
             sdl.SDLK_ESCAPE => self.closePicker(),
             sdl.SDLK_UP => {
-                if (p.rows.len > 0) {
-                    p.selected = (p.selected + p.rows.len - 1) % p.rows.len;
-                }
+                if (p.count > 0) p.selected = (p.selected + p.count - 1) % p.count;
             },
             sdl.SDLK_DOWN => {
-                if (p.rows.len > 0) p.selected = (p.selected + 1) % p.rows.len;
+                if (p.count > 0) p.selected = (p.selected + 1) % p.count;
             },
             sdl.SDLK_RETURN => self.connectSelected(),
             else => {},
         }
-        self.swallow_text = true;
+        self.text_gate.claim();
     }
 
     /// Opens the highlighted host in a new tab and dismisses the picker.
@@ -498,7 +534,7 @@ pub const App = struct {
         }
 
         if (self.picker) |p| {
-            self.renderer.drawHostPicker(p.rows, p.selected, th_, width, height);
+            self.renderer.drawHostPicker(self.pickerRows(), p.selected, th_, width, height);
         }
         if (self.toast) |t| {
             self.renderer.drawToast(t.buf[0..t.len], th_, width, height);
@@ -509,12 +545,41 @@ pub const App = struct {
 
     fn updateWindowTitle(self: *App, tab: *tabs_mod.Tab) void {
         var buf: [tabs_mod.MAX_LABEL + 16:0]u8 = undefined;
-        const name = tab.displayName();
+        var name_buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
+        const name = tab.displayName(&name_buf);
         const written = std.fmt.bufPrintZ(&buf, "ztabb \u{2014} {s}", .{name}) catch return;
         if (std.mem.eql(u8, written, std.mem.sliceTo(&self.title_buf, 0))) return;
         @memcpy(self.title_buf[0..written.len], written);
         self.title_buf[written.len] = 0;
         sdl.setWindowTitle(self.window, &self.title_buf);
+    }
+};
+
+/// Decides whether the TEXT_INPUT event that follows a key press still needs
+/// forwarding, or was already covered by the key handler.
+///
+/// SDL delivers TEXT_INPUT right after the KEY_DOWN that produced it, and not
+/// at all for keys that produce no text. A flag cleared only by a TEXT_INPUT
+/// therefore stays set after Enter or Ctrl+C and swallows the *next* character
+/// typed, which looks like keys needing several presses to register.
+pub const TextGate = struct {
+    claimed: bool = false,
+
+    /// Starts a new press. Anything an earlier press claimed is forgotten,
+    /// because the text event it was waiting for is never coming.
+    pub fn keyPressed(self: *TextGate) void {
+        self.claimed = false;
+    }
+
+    /// The key handler already produced the bytes for this press.
+    pub fn claim(self: *TextGate) void {
+        self.claimed = true;
+    }
+
+    /// True when the text event duplicates what the key handler already sent.
+    pub fn consumeText(self: *TextGate) bool {
+        defer self.claimed = false;
+        return self.claimed;
     }
 };
 
@@ -663,6 +728,33 @@ fn expectKey(key: u32, mods: u16, expected: []const u8) !void {
     try testing.expectEqualSlices(u8, expected, out);
 }
 
+test "no plain letter or digit is stolen from the shell" {
+    // A single mis-mapped key silently stops that character from ever being
+    // typed, so check the whole printable range rather than a sample.
+    var buf: [16]u8 = undefined;
+    var key: u32 = 0x20;
+    while (key <= 0x7e) : (key += 1) {
+        if (key == sdl.SDLK_SPACE) continue; // handled below
+        try testing.expect(shortcutFor(key, 0) == null);
+        if (encodeKey(key, 0, &buf)) |bytes| {
+            std.debug.print("key 0x{X} ('{c}') wrongly encoded as {any}\n", .{ key, @as(u8, @intCast(key)), bytes });
+            return error.PrintableKeyStolen;
+        }
+    }
+}
+
+test "every letter reaches the shell as text" {
+    var buf: [16]u8 = undefined;
+    for ("abcdefghijklmnopqrstuvwxyz") |c| {
+        try testing.expect(encodeKey(c, 0, &buf) == null); // left to TEXT_INPUT
+        try testing.expect(shortcutFor(c, 0) == null);
+        try testing.expect(shortcutFor(c, sdl.KMOD_LSHIFT) == null);
+        // Ctrl must still produce the control code.
+        const ctrl = encodeKey(c, sdl.KMOD_LCTRL, &buf).?;
+        try testing.expectEqual(@as(u8, @intCast(c - 'a' + 1)), ctrl[0]);
+    }
+}
+
 test "printable keys produce no bytes and are left to TEXT_INPUT" {
     // Encoding them here as well as in onTextInput is what made every typed
     // character appear twice.
@@ -763,6 +855,45 @@ test "encodeKey never writes past a short buffer" {
     var buf: [2]u8 = undefined;
     // "\x1b[5~" needs four bytes.
     try testing.expect(encodeKey(sdl.SDLK_PAGEUP, 0, &buf) == null);
+}
+
+test "a key that sends no text does not swallow the next character" {
+    // The reported symptom: after Enter (or any special key) the next
+    // character typed was dropped and had to be pressed again.
+    var gate = TextGate{};
+
+    gate.keyPressed(); // Enter
+    gate.claim(); // the key handler wrote "\r"
+    // No TEXT_INPUT follows Enter.
+
+    gate.keyPressed(); // 'a'
+    try testing.expect(!gate.consumeText()); // its TEXT_INPUT must get through
+}
+
+test "a key that sends its own bytes swallows exactly one text event" {
+    var gate = TextGate{};
+    gate.keyPressed();
+    gate.claim();
+    try testing.expect(gate.consumeText()); // duplicate, dropped
+    try testing.expect(!gate.consumeText()); // nothing left to drop
+}
+
+test "a plain printable key leaves its text event alone" {
+    var gate = TextGate{};
+    gate.keyPressed(); // encodeKey returns null, nothing claimed
+    try testing.expect(!gate.consumeText());
+}
+
+test "a long run of special keys never eats a character" {
+    var gate = TextGate{};
+    for (0..100) |i| {
+        gate.keyPressed();
+        if (i % 3 != 0) gate.claim(); // arrows, Enter, Ctrl+C ...
+        if (i % 3 == 0) {
+            // a printable key: its text must always reach the shell
+            try testing.expect(!gate.consumeText());
+        }
+    }
 }
 
 test "the app modifier does not steal plain Ctrl from the shell" {

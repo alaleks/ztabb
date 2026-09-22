@@ -10,6 +10,7 @@ const font = @import("font");
 const term = @import("term");
 const theme = @import("theme");
 const highlight = @import("highlight");
+const icons = @import("icons");
 const tabs_mod = @import("tabs");
 
 pub const TAB_BAR_CELLS: u32 = 2;
@@ -20,8 +21,9 @@ pub const TAB_WIDTH_CELLS: u32 = 18;
 const TAB_MIN_CELLS: u32 = 8;
 const TAB_CLOSE_CELLS: u32 = 3;
 const PLUS_CELLS: u32 = 3;
-/// The caret beside "+" that drops down the SSH host list.
-const SSH_CELLS: u32 = 3;
+/// The SSH button beside "+". Wide enough to carry a full-size icon: it is
+/// the entry point to every saved connection, not a decoration.
+const SSH_CELLS: u32 = 5;
 
 /// What sits under a point in the tab bar. Pure geometry, so the hit testing
 /// the mouse handler depends on can be tested without a window.
@@ -110,8 +112,16 @@ pub const Renderer = struct {
     r: *sdl.Renderer,
     regular: *sdl.Texture,
     bold: *sdl.Texture,
-    /// The baked glyph set currently uploaded to the textures.
+    /// Terminal text, in the weights the grid uses.
     atlas_size: font.Size,
+    /// Interface text: weight 500 at a smaller size, for tab labels and
+    /// dialogs. Terminal text has to stay on the grid; chrome does not, and
+    /// reads better a step down in size and a step up in weight.
+    ui: *sdl.Texture,
+    ui_size: font.Size,
+    /// One texture holding every UI icon, rasterized at the current cell size.
+    icon_strip: *sdl.Texture,
+    icon_size: u32,
     /// Multiplies the 8x16 glyph box; covers both HiDPI and the user's zoom.
     scale: u32 = 1,
 
@@ -121,15 +131,78 @@ pub const Renderer = struct {
             .r = r,
             .regular = undefined,
             .bold = undefined,
-            .atlas_size = font.sizeAt(0),
+            .atlas_size = font.bestSize(.regular, font.base_w, font.base_h),
+            .ui = undefined,
+            .ui_size = font.bestSize(.medium, font.base_w, font.base_h),
+            .icon_strip = undefined,
+            .icon_size = 0,
         };
-        try self.uploadAtlas(font.sizeAt(0));
+        try self.uploadAtlas(self.atlas_size);
+        errdefer {
+            sdl.destroyTexture(self.bold);
+            sdl.destroyTexture(self.regular);
+        }
+        try self.uploadUi(self.ui_size);
+        errdefer sdl.destroyTexture(self.ui);
+        try self.uploadIcons(self.iconSize());
         return self;
     }
 
     pub fn deinit(self: *Renderer) void {
+        sdl.destroyTexture(self.icon_strip);
+        sdl.destroyTexture(self.ui);
         sdl.destroyTexture(self.bold);
         sdl.destroyTexture(self.regular);
+    }
+
+    fn uploadUi(self: *Renderer, size: font.Size) !void {
+        const pixels = try self.gpa.alloc(u32, font.atlasPixels(size));
+        defer self.gpa.free(pixels);
+        const w: i32 = @intCast(font.atlasW(size));
+        font.buildAtlas(size, pixels);
+        const tex = try sdl.createTexture(self.r, w, @intCast(font.atlasH(size)));
+        sdl.updateTexture(tex, pixels, w * 4);
+        self.ui = tex;
+        self.ui_size = size;
+    }
+
+    /// Icons are rasterized a little under the tab-bar height, which is the
+    /// largest they are ever drawn; smaller boxes scale down from this.
+    fn iconSize(self: *const Renderer) u32 {
+        return @max(12, self.cellH() * TAB_BAR_CELLS * 7 / 8);
+    }
+
+    fn uploadIcons(self: *Renderer, size: u32) !void {
+        const pixels = try self.gpa.alloc(u32, icons.stripPixels(size));
+        defer self.gpa.free(pixels);
+        icons.buildStrip(size, pixels);
+
+        const w: i32 = @intCast(icons.stripW(size));
+        const tex = try sdl.createTexture(self.r, w, @intCast(size));
+        sdl.updateTexture(tex, pixels, w * 4);
+        self.icon_strip = tex;
+        self.icon_size = size;
+    }
+
+    /// Draws an icon centred in the box at (x, y, w, h).
+    fn drawIcon(self: *Renderer, icon: icons.Icon, x: f32, y: f32, w: f32, h: f32, color: u32) void {
+        const s: f32 = @floatFromInt(self.icon_size);
+        const src = sdl.FRect{
+            .x = @floatFromInt(icons.stripX(icon, self.icon_size)),
+            .y = 0,
+            .w = s,
+            .h = s,
+        };
+        // Square, and never wider than the box it is centred in.
+        const side = @min(s, @min(w, h));
+        const dst = sdl.FRect{
+            .x = @round(x + (w - side) / 2),
+            .y = @round(y + (h - side) / 2),
+            .w = side,
+            .h = side,
+        };
+        sdl.setTextureColorMod(self.icon_strip, color);
+        sdl.renderTexture(self.r, self.icon_strip, &src, &dst);
     }
 
     fn uploadAtlas(self: *Renderer, size: font.Size) !void {
@@ -139,12 +212,12 @@ pub const Renderer = struct {
         const w: i32 = @intCast(font.atlasW(size));
         const h: i32 = @intCast(font.atlasH(size));
 
-        font.buildAtlas(.regular, size, pixels);
+        font.buildAtlas(size, pixels);
         const regular = try sdl.createTexture(self.r, w, h);
         errdefer sdl.destroyTexture(regular);
         sdl.updateTexture(regular, pixels, w * 4);
 
-        font.buildAtlas(.bold, size, pixels);
+        font.buildAtlas(font.bestSize(.bold, size.w, size.h), pixels);
         const bold = try sdl.createTexture(self.r, w, h);
         errdefer sdl.destroyTexture(bold);
         sdl.updateTexture(bold, pixels, w * 4);
@@ -159,14 +232,35 @@ pub const Renderer = struct {
     /// stretched up from the smallest baked size.
     pub fn setScale(self: *Renderer, scale: u32) void {
         self.scale = @max(scale, 1);
-        const wanted = font.bestSize(self.cellW(), self.cellH());
-        if (wanted.index == self.atlas_size.index) return;
+        defer self.refreshIcons();
+        defer self.refreshUi();
+
+        const wanted = font.bestSize(.regular, self.cellW(), self.cellH());
+        if (wanted.offset == self.atlas_size.offset) return;
 
         const old_regular = self.regular;
         const old_bold = self.bold;
         self.uploadAtlas(wanted) catch return;
         sdl.destroyTexture(old_regular);
         sdl.destroyTexture(old_bold);
+    }
+
+    fn refreshUi(self: *Renderer) void {
+        const wanted = font.bestSize(.medium, self.cellW(), self.cellH());
+        if (wanted.offset == self.ui_size.offset) return;
+        const old = self.ui;
+        self.uploadUi(wanted) catch return;
+        sdl.destroyTexture(old);
+    }
+
+    /// Re-rasterizes the icons when the cell size changes, so they stay sharp
+    /// rather than being scaled up from the size they were first built at.
+    fn refreshIcons(self: *Renderer) void {
+        const wanted = self.iconSize();
+        if (wanted == self.icon_size) return;
+        const old = self.icon_strip;
+        self.uploadIcons(wanted) catch return;
+        sdl.destroyTexture(old);
     }
 
     pub fn cellW(self: *const Renderer) u32 {
@@ -179,8 +273,7 @@ pub const Renderer = struct {
 
     fn drawGlyph(self: *Renderer, cp: u21, x: f32, y: f32, color: u32, bold: bool) void {
         if (cp == ' ' or cp == 0) return;
-        const weight: font.Weight = if (bold) .bold else .regular;
-        if (font.isBlank(cp, weight, self.atlas_size)) return;
+        if (font.isBlank(cp, self.atlas_size)) return;
 
         const tex = if (bold) self.bold else self.regular;
         const rect = font.atlasRect(cp, self.atlas_size);
@@ -200,6 +293,38 @@ pub const Renderer = struct {
         sdl.renderTexture(self.r, tex, &src, &dst);
     }
 
+    /// Draws interface text -- tab labels, dialogs -- in the medium face at
+    /// its own smaller cell. Returns the width used, in pixels.
+    pub fn drawUiText(self: *Renderer, text: []const u8, x: f32, y: f32, color: u32) f32 {
+        var view = std.unicode.Utf8View.init(text) catch return 0;
+        var it = view.iterator();
+        const cw: f32 = @floatFromInt(self.ui_size.w);
+        const ch: f32 = @floatFromInt(self.ui_size.h);
+        var col: f32 = 0;
+        while (it.nextCodepoint()) |cp| : (col += 1) {
+            if (cp == ' ' or cp == 0 or font.isBlank(cp, self.ui_size)) continue;
+            const rect = font.atlasRect(cp, self.ui_size);
+            const src = sdl.FRect{
+                .x = @floatFromInt(rect.x),
+                .y = @floatFromInt(rect.y),
+                .w = cw,
+                .h = ch,
+            };
+            const dst = sdl.FRect{ .x = @round(x + col * cw), .y = @round(y), .w = cw, .h = ch };
+            sdl.setTextureColorMod(self.ui, color);
+            sdl.renderTexture(self.r, self.ui, &src, &dst);
+        }
+        return col * cw;
+    }
+
+    pub fn uiCellW(self: *const Renderer) f32 {
+        return @floatFromInt(self.ui_size.w);
+    }
+
+    pub fn uiCellH(self: *const Renderer) f32 {
+        return @floatFromInt(self.ui_size.h);
+    }
+
     /// Draws a UTF-8 string starting at a pixel position, one cell per code
     /// point. Returns the number of cells consumed.
     pub fn drawText(self: *Renderer, text: []const u8, x: f32, y: f32, color: u32, bold: bool) u32 {
@@ -216,6 +341,35 @@ pub const Renderer = struct {
         sdl.setRenderDrawRgb(self.r, color);
         const rect = sdl.FRect{ .x = x, .y = y, .w = w, .h = h };
         sdl.renderFillRect(self.r, &rect);
+    }
+
+    /// A vertical gradient, drawn as one-pixel bands.
+    ///
+    /// SDL's fill takes a single colour, so the sweep is built from strips;
+    /// at tab-bar height that is a few dozen rectangles for the one focused
+    /// tab, which costs nothing next to the glyphs on screen.
+    fn fillVGradient(
+        self: *Renderer,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        top: u32,
+        bottom: u32,
+    ) void {
+        const bands: u32 = @intFromFloat(@max(1, @min(h, 64)));
+        const step = h / @as(f32, @floatFromInt(bands));
+        for (0..bands) |i| {
+            const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(bands - 1 | 1));
+            self.fill(
+                x,
+                y + @as(f32, @floatFromInt(i)) * step,
+                w,
+                // Overlap by a hair so rounding cannot leave seams between bands.
+                step + 1,
+                theme.mix(bottom, top, t),
+            );
+        }
     }
 
     // -- terminal grid -----------------------------------------------------
@@ -318,7 +472,6 @@ pub const Renderer = struct {
     // -- tab bar -----------------------------------------------------------
 
     pub fn drawTabBar(self: *Renderer, tabs: *tabs_mod.Tabs, th: *const theme.Theme, width: f32) void {
-        const ch: f32 = @floatFromInt(self.cellH());
         const cw: f32 = @floatFromInt(self.cellW());
         const bar = self.tabBar(tabs.count, width);
         const bar_h = bar.height();
@@ -329,25 +482,59 @@ pub const Renderer = struct {
             const x = bar.tabX(i);
             if (x >= width) break;
             const is_active = tabs.isActive(i);
-            self.fill(x, 0, tab_w - 1, bar_h, if (is_active) th.tab_active_bg else th.tab_inactive_bg);
-            self.fill(x + tab_w - 1, 0, 1, bar_h, th.tab_border);
             if (is_active) {
-                // An accent strip along the top marks the focused tab.
+                // The focused tab is washed with the accent at the top and
+                // settles into the terminal's own ground at the bottom, so it
+                // reads as the front-most tab without a hard outline.
+                self.fillVGradient(
+                    x,
+                    0,
+                    tab_w - 1,
+                    bar_h,
+                    theme.tabGradientTop(th),
+                    th.tab_active_bg,
+                );
                 self.fill(x, 0, tab_w - 1, @max(2.0, @as(f32, @floatFromInt(self.scale)) * 2), th.ansi[4]);
+            } else {
+                self.fill(x, 0, tab_w - 1, bar_h, th.tab_inactive_bg);
             }
+            self.fill(x + tab_w - 1, 0, 1, bar_h, th.tab_border);
 
             const fg = if (is_active) th.tab_active_fg else th.tab_inactive_fg;
 
-            var label_buf: [tabs_mod.MAX_LABEL + 8]u8 = undefined;
-            const prefix: []const u8 = if (tab.kind == .ssh) "\u{2387} " else "";
-            const cells: u32 = @intFromFloat(tab_w / cw);
-            const reserved: u32 = if (bar.hasClose()) TAB_CLOSE_CELLS + 1 else 1;
-            const budget = cells -| reserved;
-            const label = fitLabel(&label_buf, prefix, tab.displayName(), budget);
-            _ = self.drawText(label, x + cw / 2, ch / 2, fg, is_active);
+            // A server or prompt icon marks what kind of tab this is; the
+            // label then starts one cell further in.
+            self.drawIcon(
+                if (tab.kind == .ssh) .remote else .terminal,
+                x + cw / 4,
+                0,
+                cw * 1.5,
+                bar_h,
+                if (is_active) th.ansi[4] else th.tab_inactive_fg,
+            );
+
+            var name_buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
+            var label_buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
+            // The label is set in the smaller interface face, so its budget is
+            // counted in that cell rather than the terminal's.
+            const label_x = x + cw * 2;
+            const room = tab_w - (label_x - x) - if (bar.hasClose())
+                cw * @as(f32, @floatFromInt(TAB_CLOSE_CELLS))
+            else
+                cw / 2;
+            const budget: u32 = @intFromFloat(@max(0, room / self.uiCellW()));
+            const label = fitLabel(&label_buf, "", tab.displayName(&name_buf), budget);
+            _ = self.drawUiText(label, label_x, (bar_h - self.uiCellH()) / 2, fg);
 
             if (bar.hasClose()) {
-                _ = self.drawText("\u{00D7}", bar.closeX(i) + cw / 2, ch / 2, th.tab_inactive_fg, false);
+                self.drawIcon(
+                    .close,
+                    bar.closeX(i),
+                    0,
+                    cw * @as(f32, @floatFromInt(TAB_CLOSE_CELLS)),
+                    bar_h,
+                    if (is_active) th.tab_active_fg else th.tab_inactive_fg,
+                );
             }
         }
 
@@ -355,11 +542,22 @@ pub const Renderer = struct {
         // list. Without them neither is discoverable without the shortcuts.
         const plus_x = bar.plusX();
         self.fill(plus_x, 0, bar.plusWidth(), bar_h, th.tab_bar_bg);
-        _ = self.drawText("+", plus_x + cw, ch / 2, th.tab_active_fg, true);
+        self.drawIcon(.plus, plus_x, 0, bar.plusWidth(), bar_h, th.tab_active_fg);
 
+        // The SSH button carries the connection icon at full size with a small
+        // caret under it, so it reads as "open the list of connections".
         const ssh_x = bar.sshX();
-        self.fill(ssh_x, 0, bar.sshWidth(), bar_h, th.tab_bar_bg);
-        _ = self.drawText("\u{25BE}", ssh_x + cw, ch / 2, th.tab_inactive_fg, false);
+        const ssh_w = bar.sshWidth();
+        self.fill(ssh_x, 0, ssh_w, bar_h, th.tab_bar_bg);
+        self.drawIcon(.remote, ssh_x, 0, ssh_w - cw, bar_h, th.ansi[4]);
+        self.drawIcon(
+            .chevron_down,
+            ssh_x + ssh_w - cw * 1.4,
+            bar_h * 0.3,
+            cw * 1.2,
+            bar_h * 0.55,
+            th.tab_inactive_fg,
+        );
 
         self.fill(0, bar_h - 1, width, 1, th.tab_border);
     }
@@ -408,16 +606,15 @@ pub const Renderer = struct {
         self.fill(x - 2, y - 2, p.boxW() + 4, p.boxH() + 4, th.tab_border);
         self.fill(x, y, p.boxW(), p.boxH(), th.bg);
 
-        _ = self.drawText(
+        _ = self.drawUiText(
             "SSH hosts  (\u{2191}/\u{2193} or click, Enter open, Esc cancel)",
             x + cw,
-            y + ch / 2,
+            y + (ch - self.uiCellH()) / 2,
             th.ansi[4],
-            true,
         );
 
         if (hosts.len == 0) {
-            _ = self.drawText("no hosts in ~/.ssh/config", x + cw, y + ch * 2.5, th.tab_inactive_fg, false);
+            _ = self.drawUiText("no hosts in ~/.ssh/config", x + cw, y + ch * 2, th.tab_inactive_fg);
             return;
         }
 
@@ -428,11 +625,11 @@ pub const Renderer = struct {
             if (is_sel) self.fill(x + cw / 2, row_y, p.boxW() - cw, ch, th.selection);
 
             const fg = if (is_sel) th.fg else th.hl_command;
-            var used = self.drawText(host.alias, x + cw, row_y, fg, is_sel);
+            const text_y = row_y + (ch - self.uiCellH()) / 2;
+            const used = self.drawUiText(host.alias, x + cw, text_y, fg);
             if (host.detail.len > 0) {
-                used += 1;
-                const detail_x = x + cw + @as(f32, @floatFromInt(@max(used, 16) * self.cellW()));
-                _ = self.drawText(host.detail, detail_x, row_y, th.tab_inactive_fg, false);
+                const gap = @max(used + self.uiCellW(), self.uiCellW() * 18);
+                _ = self.drawUiText(host.detail, x + cw + gap, text_y, th.tab_inactive_fg);
             }
         }
     }
@@ -443,7 +640,7 @@ pub const Renderer = struct {
         const ch: f32 = @floatFromInt(self.cellH());
         const y = height - ch * 1.5;
         self.fill(0, y, width, ch * 1.5, th.tab_bar_bg);
-        _ = self.drawText(text, cw, y + ch / 4, th.fg, false);
+        _ = self.drawUiText(text, cw, y + (ch * 1.5 - self.uiCellH()) / 2, th.fg);
     }
 };
 
@@ -712,6 +909,11 @@ test "narrow tabs drop the close button rather than overlap the label" {
 test "clicking the plus button asks for a new tab" {
     const bar = testBar(3, 800);
     try testing.expectEqual(Hit.new_tab, bar.hit(bar.plusX() + 4, 8));
+}
+
+test "the SSH button is the larger of the two, being the connection entry point" {
+    const bar = testBar(3, 800);
+    try testing.expect(bar.sshWidth() > bar.plusWidth());
 }
 
 test "the SSH caret sits beside the plus and opens the host list" {
