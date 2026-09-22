@@ -1,0 +1,32 @@
+# Zig build artifacts
+zig-cache/
+.zig-cache/
+zig-out/
+
+# Build results
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Temporary / editor files
+.DS_Store
+*.swp
+*.swo
+*.tmp
+*.log
+
+# IDE / editor settings
+.vscode/
+.idea/
+.zed
+*.iml
+.agents
+.specify
+.claude
+
+# Coverage / profiling
+*.prof
+*.cov
