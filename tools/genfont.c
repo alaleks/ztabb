@@ -34,9 +34,9 @@ typedef struct { int w, h; int weights; } Cell;
 // set their labels in. font.zig picks the largest set that fits the box it is
 // drawing into.
 static const Cell cells[] = {
-    {6, 12, W_MEDIUM},            // UI text, 1x
+    {7, 14, W_MEDIUM},            // UI text, 1x
     {8, 16, W_REGULAR | W_BOLD},  // terminal, 1x
-    {12, 24, W_MEDIUM},           // UI text, 2x
+    {14, 28, W_MEDIUM},           // UI text, 2x
     {16, 32, W_REGULAR | W_BOLD}, // terminal, 2x
 };
 #define NCELLS ((int)(sizeof(cells) / sizeof(cells[0])))

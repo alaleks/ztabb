@@ -21,9 +21,11 @@ pub const TAB_WIDTH_CELLS: u32 = 18;
 const TAB_MIN_CELLS: u32 = 8;
 const TAB_CLOSE_CELLS: u32 = 3;
 const PLUS_CELLS: u32 = 3;
-/// The SSH button beside "+". Wide enough to carry a full-size icon: it is
-/// the entry point to every saved connection, not a decoration.
-const SSH_CELLS: u32 = 5;
+/// The SSH button beside "+". Wide enough to carry the larger icon: it is the
+/// entry point to every saved connection, not a decoration.
+const SSH_CELLS: u32 = 4;
+/// The connection button is drawn a size up from the rest of the set.
+const SSH_ICON_SCALE: f32 = 1.35;
 
 /// What sits under a point in the tab bar. Pure geometry, so the hit testing
 /// the mouse handler depends on can be tested without a window.
@@ -160,16 +162,23 @@ pub const Renderer = struct {
         defer self.gpa.free(pixels);
         const w: i32 = @intCast(font.atlasW(size));
         font.buildAtlas(size, pixels);
-        const tex = try sdl.createTexture(self.r, w, @intCast(font.atlasH(size)));
+        const tex = try sdl.createTexture(self.r, w, @intCast(font.atlasH(size)), false);
         sdl.updateTexture(tex, pixels, w * 4);
         self.ui = tex;
         self.ui_size = size;
     }
 
-    /// Icons are rasterized a little under the tab-bar height, which is the
-    /// largest they are ever drawn; smaller boxes scale down from this.
+    /// Icons are sized off the interface text, not the tab bar: an icon a
+    /// little taller than the label beside it sits with the text instead of
+    /// looming over it.
+    fn iconDrawSize(self: *const Renderer) f32 {
+        return @round(self.uiCellH() * 0.85);
+    }
+
+    /// The size icons are rasterized at. It matches the largest they are drawn
+    /// so nothing is scaled up on screen.
     fn iconSize(self: *const Renderer) u32 {
-        return @max(12, self.cellH() * TAB_BAR_CELLS * 7 / 8);
+        return @max(10, @as(u32, @intFromFloat(self.iconDrawSize() * SSH_ICON_SCALE)));
     }
 
     fn uploadIcons(self: *Renderer, size: u32) !void {
@@ -178,14 +187,26 @@ pub const Renderer = struct {
         icons.buildStrip(size, pixels);
 
         const w: i32 = @intCast(icons.stripW(size));
-        const tex = try sdl.createTexture(self.r, w, @intCast(size));
+        // Icons are drawn smaller than they are rasterized, so they want the
+        // smoothing filter; the glyph atlases are drawn 1:1 and do not.
+        const tex = try sdl.createTexture(self.r, w, @intCast(size), true);
         sdl.updateTexture(tex, pixels, w * 4);
         self.icon_strip = tex;
         self.icon_size = size;
     }
 
-    /// Draws an icon centred in the box at (x, y, w, h).
-    fn drawIcon(self: *Renderer, icon: icons.Icon, x: f32, y: f32, w: f32, h: f32, color: u32) void {
+    /// Draws an icon centred in the box at (x, y, w, h), at `scale` times the
+    /// standard icon size.
+    fn drawIcon(
+        self: *Renderer,
+        icon: icons.Icon,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: u32,
+        scale: f32,
+    ) void {
         const s: f32 = @floatFromInt(self.icon_size);
         const src = sdl.FRect{
             .x = @floatFromInt(icons.stripX(icon, self.icon_size)),
@@ -193,8 +214,8 @@ pub const Renderer = struct {
             .w = s,
             .h = s,
         };
-        // Square, and never wider than the box it is centred in.
-        const side = @min(s, @min(w, h));
+        // Square, and never larger than the box it is centred in.
+        const side = @min(self.iconDrawSize() * scale, @min(w, h));
         const dst = sdl.FRect{
             .x = @round(x + (w - side) / 2),
             .y = @round(y + (h - side) / 2),
@@ -213,12 +234,12 @@ pub const Renderer = struct {
         const h: i32 = @intCast(font.atlasH(size));
 
         font.buildAtlas(size, pixels);
-        const regular = try sdl.createTexture(self.r, w, h);
+        const regular = try sdl.createTexture(self.r, w, h, false);
         errdefer sdl.destroyTexture(regular);
         sdl.updateTexture(regular, pixels, w * 4);
 
         font.buildAtlas(font.bestSize(.bold, size.w, size.h), pixels);
-        const bold = try sdl.createTexture(self.r, w, h);
+        const bold = try sdl.createTexture(self.r, w, h, false);
         errdefer sdl.destroyTexture(bold);
         sdl.updateTexture(bold, pixels, w * 4);
 
@@ -511,6 +532,7 @@ pub const Renderer = struct {
                 cw * 1.5,
                 bar_h,
                 if (is_active) th.ansi[4] else th.tab_inactive_fg,
+                1.0,
             );
 
             var name_buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
@@ -534,6 +556,7 @@ pub const Renderer = struct {
                     cw * @as(f32, @floatFromInt(TAB_CLOSE_CELLS)),
                     bar_h,
                     if (is_active) th.tab_active_fg else th.tab_inactive_fg,
+                    0.85,
                 );
             }
         }
@@ -542,21 +565,22 @@ pub const Renderer = struct {
         // list. Without them neither is discoverable without the shortcuts.
         const plus_x = bar.plusX();
         self.fill(plus_x, 0, bar.plusWidth(), bar_h, th.tab_bar_bg);
-        self.drawIcon(.plus, plus_x, 0, bar.plusWidth(), bar_h, th.tab_active_fg);
+        self.drawIcon(.plus, plus_x, 0, bar.plusWidth(), bar_h, th.tab_active_fg, 1.0);
 
         // The SSH button carries the connection icon at full size with a small
         // caret under it, so it reads as "open the list of connections".
         const ssh_x = bar.sshX();
         const ssh_w = bar.sshWidth();
         self.fill(ssh_x, 0, ssh_w, bar_h, th.tab_bar_bg);
-        self.drawIcon(.remote, ssh_x, 0, ssh_w - cw, bar_h, th.ansi[4]);
+        self.drawIcon(.remote, ssh_x, 0, ssh_w - cw * 0.8, bar_h, th.ansi[4], SSH_ICON_SCALE);
         self.drawIcon(
             .chevron_down,
-            ssh_x + ssh_w - cw * 1.4,
-            bar_h * 0.3,
-            cw * 1.2,
-            bar_h * 0.55,
+            ssh_x + ssh_w - cw,
+            bar_h * 0.34,
+            cw * 0.8,
+            bar_h * 0.5,
             th.tab_inactive_fg,
+            0.6,
         );
 
         self.fill(0, bar_h - 1, width, 1, th.tab_border);
@@ -914,6 +938,9 @@ test "clicking the plus button asks for a new tab" {
 test "the SSH button is the larger of the two, being the connection entry point" {
     const bar = testBar(3, 800);
     try testing.expect(bar.sshWidth() > bar.plusWidth());
+    // Its icon is drawn a size up from the rest of the set, and the button has
+    // to be wide enough to hold it.
+    try testing.expect(SSH_ICON_SCALE > 1.0);
 }
 
 test "the SSH caret sits beside the plus and opens the host list" {

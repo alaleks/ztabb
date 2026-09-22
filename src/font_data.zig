@@ -13,12 +13,12 @@ pub const Section = struct {
 };
 
 pub const sections = [_]Section{
-    .{ .w = 6, .h = 12, .weight = 2, .offset = 0 },
-    .{ .w = 8, .h = 16, .weight = 0, .offset = 76824 },
-    .{ .w = 8, .h = 16, .weight = 1, .offset = 213400 },
-    .{ .w = 12, .h = 24, .weight = 2, .offset = 349976 },
-    .{ .w = 16, .h = 32, .weight = 0, .offset = 657272 },
-    .{ .w = 16, .h = 32, .weight = 1, .offset = 1203576 },
+    .{ .w = 7, .h = 14, .weight = 2, .offset = 0 },
+    .{ .w = 8, .h = 16, .weight = 0, .offset = 104566 },
+    .{ .w = 8, .h = 16, .weight = 1, .offset = 241142 },
+    .{ .w = 14, .h = 28, .weight = 2, .offset = 377718 },
+    .{ .w = 16, .h = 32, .weight = 0, .offset = 795982 },
+    .{ .w = 16, .h = 32, .weight = 1, .offset = 1342286 },
 };
 
 pub const Range = struct { lo: u21, hi: u21, base: u16 };

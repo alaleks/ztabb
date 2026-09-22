@@ -91,9 +91,10 @@ fn roundedBoxDistance(px: f32, py: f32, hx: f32, hy: f32, radius: f32) f32 {
 }
 
 /// One stroke weight across the set, so no icon reads heavier than the one
-/// beside it. Kept light: at tab-bar size a heavy stroke turns these into
-/// blobs rather than the fine line work native interfaces use.
-const W: f32 = 0.08;
+/// beside it. Chosen to land on the stem width of the interface face at the
+/// size icons are drawn beside it, so the two read as one piece of typography
+/// rather than as text with pictures next to it.
+const W: f32 = 0.07;
 
 const plus_shape = [_]Prim{
     .{ .stroke = .{ .a = p(0.5, 0.23), .b = p(0.5, 0.77), .w = W } },

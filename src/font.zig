@@ -194,8 +194,8 @@ test "the terminal face is baked at both densities, in both weights" {
 test "interface text is baked at weight 500, smaller than the terminal cell" {
     // Tab labels need to read at a smaller size than terminal text; medium
     // carries at that size where regular goes faint and bold goes heavy.
-    const ui_1x = find(.medium, 6, 12).?;
-    const ui_2x = find(.medium, 12, 24).?;
+    const ui_1x = find(.medium, 7, 14).?;
+    const ui_2x = find(.medium, 14, 28).?;
     try testing.expect(ui_1x.w < base_w);
     try testing.expect(ui_2x.w < base_w * 2);
     try testing.expectEqual(Weight.medium, ui_1x.weight);
@@ -203,12 +203,11 @@ test "interface text is baked at weight 500, smaller than the terminal cell" {
 }
 
 test "medium sits between regular and bold in weight" {
-    // Compared at the same cell so the measurement is like for like: medium is
-    // baked at 12x24, so scale the 16x32 terminal faces by area.
+    // Compared per pixel of cell, so the different cell sizes stay comparable.
     var medium_ink: f64 = 0;
     var regular_ink: f64 = 0;
     var bold_ink: f64 = 0;
-    const med = find(.medium, 12, 24).?;
+    const med = find(.medium, 14, 28).?;
     const reg = find(.regular, 16, 32).?;
     const bld = find(.bold, 16, 32).?;
     for ('a'..'z' + 1) |cp| {
@@ -233,8 +232,9 @@ test "bestSize picks the largest set that fits and never overshoots" {
     // Smaller than anything baked: fall back to the smallest.
     try testing.expectEqual(@as(u32, 8), bestSize(.regular, 4, 8).w);
 
-    try testing.expectEqual(@as(u32, 6), bestSize(.medium, 6, 12).w);
-    try testing.expectEqual(@as(u32, 12), bestSize(.medium, 14, 28).w);
+    try testing.expectEqual(@as(u32, 7), bestSize(.medium, 7, 14).w);
+    try testing.expectEqual(@as(u32, 7), bestSize(.medium, 13, 27).w);
+    try testing.expectEqual(@as(u32, 14), bestSize(.medium, 14, 28).w);
 }
 
 test "bestSize always returns the weight it was asked for" {

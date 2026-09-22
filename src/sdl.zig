@@ -109,6 +109,7 @@ pub const TEXTUREACCESS_STATIC: u32 = 0;
 pub const BLENDMODE_NONE: u32 = 0;
 pub const BLENDMODE_BLEND: u32 = 1;
 pub const SCALEMODE_NEAREST: u32 = 0;
+pub const SCALEMODE_LINEAR: u32 = 1;
 
 pub const FRect = extern struct {
     x: f32,
@@ -312,11 +313,14 @@ pub fn renderTexture(r: ?*Renderer, tex: ?*Texture, src: *const FRect, dst: *con
     _ = SDL_RenderTexture(r, tex, src, dst);
 }
 
-pub fn createTexture(r: ?*Renderer, w: i32, h: i32) Error!*Texture {
+/// `smooth` picks linear filtering, for artwork that is drawn at a size other
+/// than the one it was rasterized at. Glyph atlases are drawn 1:1 and want
+/// nearest, which keeps their edges exactly as they were baked.
+pub fn createTexture(r: ?*Renderer, w: i32, h: i32, smooth: bool) Error!*Texture {
     const tex = SDL_CreateTexture(r, PIXELFORMAT_ARGB8888, TEXTUREACCESS_STATIC, w, h) orelse
         return error.TextureCreationFailed;
     _ = SDL_SetTextureBlendMode(tex, BLENDMODE_BLEND);
-    _ = SDL_SetTextureScaleMode(tex, SCALEMODE_NEAREST);
+    _ = SDL_SetTextureScaleMode(tex, if (smooth) SCALEMODE_LINEAR else SCALEMODE_NEAREST);
     return tex;
 }
 
