@@ -20,6 +20,8 @@ pub const TAB_WIDTH_CELLS: u32 = 18;
 const TAB_MIN_CELLS: u32 = 8;
 const TAB_CLOSE_CELLS: u32 = 3;
 const PLUS_CELLS: u32 = 3;
+/// The caret beside "+" that drops down the SSH host list.
+const SSH_CELLS: u32 = 3;
 
 /// What sits under a point in the tab bar. Pure geometry, so the hit testing
 /// the mouse handler depends on can be tested without a window.
@@ -28,6 +30,7 @@ pub const Hit = union(enum) {
     tab: usize,
     close: usize,
     new_tab,
+    ssh_menu,
 };
 
 pub const TabBar = struct {
@@ -44,12 +47,21 @@ pub const TabBar = struct {
         return self.cell_w * @as(f32, @floatFromInt(PLUS_CELLS));
     }
 
+    pub fn sshWidth(self: TabBar) f32 {
+        return self.cell_w * @as(f32, @floatFromInt(SSH_CELLS));
+    }
+
+    /// Width of the button cluster tabs must leave room for.
+    fn buttonsWidth(self: TabBar) f32 {
+        return self.plusWidth() + self.sshWidth();
+    }
+
     /// Tabs share what is left after the "+" button, shrinking as more open
     /// rather than marching off the right edge.
     pub fn tabWidth(self: TabBar) f32 {
         if (self.count == 0) return 0;
         const preferred = self.cell_w * @as(f32, @floatFromInt(TAB_WIDTH_CELLS));
-        const available = @max(self.width - self.plusWidth(), 0);
+        const available = @max(self.width - self.buttonsWidth(), 0);
         const share = available / @as(f32, @floatFromInt(self.count));
         const min = self.cell_w * @as(f32, @floatFromInt(TAB_MIN_CELLS));
         return @max(@min(preferred, share), min);
@@ -60,7 +72,11 @@ pub const TabBar = struct {
     }
 
     pub fn plusX(self: TabBar) f32 {
-        return @min(self.tabX(self.count), @max(self.width - self.plusWidth(), 0));
+        return @min(self.tabX(self.count), @max(self.width - self.buttonsWidth(), 0));
+    }
+
+    pub fn sshX(self: TabBar) f32 {
+        return self.plusX() + self.plusWidth();
     }
 
     /// True when tabs are wide enough to carry a close button.
@@ -77,6 +93,8 @@ pub const TabBar = struct {
 
         const plus_x = self.plusX();
         if (x >= plus_x and x < plus_x + self.plusWidth()) return .new_tab;
+        const ssh_x = self.sshX();
+        if (x >= ssh_x and x < ssh_x + self.sshWidth()) return .ssh_menu;
 
         const tw = self.tabWidth();
         if (tw <= 0) return .none;
@@ -333,11 +351,15 @@ pub const Renderer = struct {
             }
         }
 
-        // The "+" button: without it there is no way to open a tab except the
-        // keyboard shortcut.
+        // "+" opens a shell tab; the caret beside it drops down the SSH host
+        // list. Without them neither is discoverable without the shortcuts.
         const plus_x = bar.plusX();
         self.fill(plus_x, 0, bar.plusWidth(), bar_h, th.tab_bar_bg);
         _ = self.drawText("+", plus_x + cw, ch / 2, th.tab_active_fg, true);
+
+        const ssh_x = bar.sshX();
+        self.fill(ssh_x, 0, bar.sshWidth(), bar_h, th.tab_bar_bg);
+        _ = self.drawText("\u{25BE}", ssh_x + cw, ch / 2, th.tab_inactive_fg, false);
 
         self.fill(0, bar_h - 1, width, 1, th.tab_border);
     }
@@ -355,6 +377,17 @@ pub const Renderer = struct {
 
     // -- overlays ----------------------------------------------------------
 
+    /// Geometry of the host picker, shared by drawing and mouse hit testing.
+    pub fn picker(self: *const Renderer, count: usize, width: f32, height: f32) Picker {
+        return .{
+            .cell_w = @floatFromInt(self.cellW()),
+            .cell_h = @floatFromInt(self.cellH()),
+            .width = width,
+            .height = height,
+            .count = count,
+        };
+    }
+
     /// Centred modal listing ssh hosts.
     pub fn drawHostPicker(
         self: *Renderer,
@@ -366,33 +399,33 @@ pub const Renderer = struct {
     ) void {
         const cw: f32 = @floatFromInt(self.cellW());
         const ch: f32 = @floatFromInt(self.cellH());
-
-        const box_cols: u32 = 52;
-        const visible = @min(hosts.len, 14);
-        const box_rows: u32 = @intCast(visible + 4);
-        const box_w = @as(f32, @floatFromInt(box_cols)) * cw;
-        const box_h = @as(f32, @floatFromInt(box_rows)) * ch;
-        const x = @max(0, (width - box_w) / 2);
-        const y = @max(0, (height - box_h) / 2);
+        const p = self.picker(hosts.len, width, height);
+        const x = p.boxX();
+        const y = p.boxY();
 
         // Dim the terminal behind the modal.
         self.fill(0, 0, width, height, th.tab_bar_bg);
-        self.fill(x - 2, y - 2, box_w + 4, box_h + 4, th.tab_border);
-        self.fill(x, y, box_w, box_h, th.bg);
+        self.fill(x - 2, y - 2, p.boxW() + 4, p.boxH() + 4, th.tab_border);
+        self.fill(x, y, p.boxW(), p.boxH(), th.bg);
 
-        _ = self.drawText("SSH hosts  (\u{2191}/\u{2193} select, Enter open, Esc cancel)", x + cw, y + ch / 2, th.ansi[4], true);
+        _ = self.drawText(
+            "SSH hosts  (\u{2191}/\u{2193} or click, Enter open, Esc cancel)",
+            x + cw,
+            y + ch / 2,
+            th.ansi[4],
+            true,
+        );
 
         if (hosts.len == 0) {
             _ = self.drawText("no hosts in ~/.ssh/config", x + cw, y + ch * 2.5, th.tab_inactive_fg, false);
             return;
         }
 
-        // Keep the selection on screen when the list is longer than the box.
-        const first = if (selected >= visible) selected - visible + 1 else 0;
-        for (hosts[first..][0..visible], 0..) |host, i| {
-            const row_y = y + ch * (2.0 + @as(f32, @floatFromInt(i)));
+        const first = p.firstVisible(selected);
+        for (hosts[first..][0..p.visible()], 0..) |host, i| {
+            const row_y = p.rowY(i);
             const is_sel = first + i == selected;
-            if (is_sel) self.fill(x + cw / 2, row_y, box_w - cw, ch, th.selection);
+            if (is_sel) self.fill(x + cw / 2, row_y, p.boxW() - cw, ch, th.selection);
 
             const fg = if (is_sel) th.fg else th.hl_command;
             var used = self.drawText(host.alias, x + cw, row_y, fg, is_sel);
@@ -411,6 +444,65 @@ pub const Renderer = struct {
         const y = height - ch * 1.5;
         self.fill(0, y, width, ch * 1.5, th.tab_bar_bg);
         _ = self.drawText(text, cw, y + ch / 4, th.fg, false);
+    }
+};
+
+/// Layout of the SSH host modal. Pure geometry so the click handling can be
+/// tested without a window.
+pub const Picker = struct {
+    cell_w: f32,
+    cell_h: f32,
+    width: f32,
+    height: f32,
+    count: usize,
+
+    /// Rows the box shows at once; longer lists scroll.
+    pub const MAX_ROWS: usize = 14;
+    const BOX_COLS: u32 = 52;
+    /// Title row plus padding above and below the list.
+    const CHROME_ROWS: usize = 4;
+    const FIRST_ROW: f32 = 2.0;
+
+    pub fn visible(self: Picker) usize {
+        return @min(self.count, MAX_ROWS);
+    }
+
+    pub fn boxW(self: Picker) f32 {
+        return @as(f32, @floatFromInt(BOX_COLS)) * self.cell_w;
+    }
+
+    pub fn boxH(self: Picker) f32 {
+        return @as(f32, @floatFromInt(self.visible() + CHROME_ROWS)) * self.cell_h;
+    }
+
+    pub fn boxX(self: Picker) f32 {
+        return @max(0, (self.width - self.boxW()) / 2);
+    }
+
+    pub fn boxY(self: Picker) f32 {
+        return @max(0, (self.height - self.boxH()) / 2);
+    }
+
+    /// Index of the first host on screen, scrolled so `selected` is visible.
+    pub fn firstVisible(self: Picker, selected: usize) usize {
+        const v = self.visible();
+        return if (selected >= v) selected - v + 1 else 0;
+    }
+
+    /// Top edge of the i-th *visible* row.
+    pub fn rowY(self: Picker, i: usize) f32 {
+        return self.boxY() + self.cell_h * (FIRST_ROW + @as(f32, @floatFromInt(i)));
+    }
+
+    /// The host index under a point, or null when the click missed the list.
+    pub fn hitRow(self: Picker, x: f32, y: f32, selected: usize) ?usize {
+        if (self.count == 0) return null;
+        if (x < self.boxX() or x >= self.boxX() + self.boxW()) return null;
+        const top = self.rowY(0);
+        if (y < top) return null;
+        const i: usize = @intFromFloat((y - top) / self.cell_h);
+        if (i >= self.visible()) return null;
+        return self.firstVisible(selected) + i;
     }
 };
 
@@ -622,6 +714,81 @@ test "clicking the plus button asks for a new tab" {
     try testing.expectEqual(Hit.new_tab, bar.hit(bar.plusX() + 4, 8));
 }
 
+test "the SSH caret sits beside the plus and opens the host list" {
+    const bar = testBar(3, 800);
+    try testing.expectEqual(bar.plusX() + bar.plusWidth(), bar.sshX());
+    try testing.expectEqual(Hit.ssh_menu, bar.hit(bar.sshX() + 4, 8));
+    // The two buttons must not overlap.
+    try testing.expectEqual(Hit.new_tab, bar.hit(bar.sshX() - 1, 8));
+    try testing.expectEqual(Hit.ssh_menu, bar.hit(bar.sshX(), 8));
+}
+
+test "both buttons stay on screen when tabs overflow" {
+    const bar = testBar(100, 400);
+    try testing.expect(bar.sshX() + bar.sshWidth() <= 400);
+    try testing.expectEqual(Hit.new_tab, bar.hit(bar.plusX() + 1, 8));
+    try testing.expectEqual(Hit.ssh_menu, bar.hit(bar.sshX() + 1, 8));
+}
+
+fn testPicker(count: usize) Picker {
+    return .{ .cell_w = 8, .cell_h = 16, .width = 800, .height = 600, .count = count };
+}
+
+test "the picker box is centred and sized to its list" {
+    const small = testPicker(3);
+    try testing.expectEqual(@as(usize, 3), small.visible());
+    try testing.expectEqual(@as(f32, 16 * 7), small.boxH()); // 3 rows + chrome
+    try testing.expectEqual((800 - small.boxW()) / 2, small.boxX());
+
+    // A long list stops growing and scrolls instead.
+    const big = testPicker(100);
+    try testing.expectEqual(Picker.MAX_ROWS, big.visible());
+    try testing.expectEqual(big.boxH(), testPicker(Picker.MAX_ROWS).boxH());
+}
+
+test "the picker scrolls to keep the selection visible" {
+    const p = testPicker(100);
+    try testing.expectEqual(@as(usize, 0), p.firstVisible(0));
+    try testing.expectEqual(@as(usize, 0), p.firstVisible(Picker.MAX_ROWS - 1));
+    try testing.expectEqual(@as(usize, 1), p.firstVisible(Picker.MAX_ROWS));
+    try testing.expectEqual(@as(usize, 86), p.firstVisible(99));
+}
+
+test "clicking a row in the picker names the right host" {
+    const p = testPicker(5);
+    try testing.expectEqual(@as(usize, 0), p.hitRow(p.boxX() + 10, p.rowY(0) + 2, 0).?);
+    try testing.expectEqual(@as(usize, 2), p.hitRow(p.boxX() + 10, p.rowY(2) + 2, 0).?);
+    try testing.expectEqual(@as(usize, 4), p.hitRow(p.boxX() + 10, p.rowY(4) + 2, 0).?);
+}
+
+test "a click in a scrolled picker accounts for the offset" {
+    const p = testPicker(100);
+    const selected = Picker.MAX_ROWS + 4; // scrolled down by 5
+    try testing.expectEqual(@as(usize, 5), p.hitRow(p.boxX() + 10, p.rowY(0) + 2, selected).?);
+}
+
+test "clicks outside the picker list hit nothing" {
+    const p = testPicker(5);
+    try testing.expect(p.hitRow(p.boxX() - 1, p.rowY(0) + 2, 0) == null);
+    try testing.expect(p.hitRow(p.boxX() + p.boxW(), p.rowY(0) + 2, 0) == null);
+    try testing.expect(p.hitRow(p.boxX() + 10, p.boxY(), 0) == null); // title row
+    try testing.expect(p.hitRow(p.boxX() + 10, p.rowY(5) + 2, 0) == null); // past the end
+    try testing.expect(testPicker(0).hitRow(400, 300, 0) == null);
+}
+
+test "every point in the picker resolves without panicking" {
+    for ([_]usize{ 0, 1, 5, 14, 60 }) |count| {
+        const p = testPicker(count);
+        var y: f32 = 0;
+        while (y < 600) : (y += 3) {
+            var x: f32 = 0;
+            while (x < 800) : (x += 17) {
+                if (p.hitRow(x, y, 0)) |i| try testing.expect(i < count);
+            }
+        }
+    }
+}
+
 test "clicks outside the bar hit nothing" {
     const bar = testBar(3, 800);
     try testing.expectEqual(Hit.none, bar.hit(10, bar.height())); // below the bar
@@ -645,7 +812,7 @@ test "every point in the bar resolves without panicking" {
         while (x < 640) : (x += 1) {
             switch (bar.hit(x, 8)) {
                 .tab, .close => |i| try testing.expect(i < count),
-                .new_tab, .none => {},
+                .new_tab, .ssh_menu, .none => {},
             }
         }
     }

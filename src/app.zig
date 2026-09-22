@@ -295,16 +295,31 @@ pub const App = struct {
     /// Mouse positions arrive in window points; the grid is laid out in
     /// backbuffer pixels, so they have to be scaled on a HiDPI display.
     fn onMouseDown(self: *App, ev: sdl.MouseButtonEvent) void {
-        if (self.picker != null) return;
         if (ev.button != sdl.BUTTON_LEFT) return;
 
         const scale: f32 = @floatFromInt(self.dpi_scale);
         const x = ev.x * scale;
         const y = ev.y * scale;
 
+        if (self.picker) |p| {
+            const layout = self.renderer.picker(
+                p.rows.len,
+                @floatFromInt(self.win_w),
+                @floatFromInt(self.win_h),
+            );
+            if (layout.hitRow(x, y, p.selected)) |i| {
+                self.picker.?.selected = i;
+                self.connectSelected();
+            } else {
+                self.closePicker();
+            }
+            return;
+        }
+
         const bar = self.renderer.tabBar(self.tabs.count, @floatFromInt(self.win_w));
         switch (bar.hit(x, y)) {
             .new_tab => self.newShellTab(),
+            .ssh_menu => self.openPicker(),
             .tab => |i| self.tabs.switchTo(i) catch {},
             .close => |i| {
                 self.tabs.closeTab(i) catch {};
@@ -410,28 +425,25 @@ pub const App = struct {
             sdl.SDLK_DOWN => {
                 if (p.rows.len > 0) p.selected = (p.selected + 1) % p.rows.len;
             },
-            sdl.SDLK_RETURN => {
-                const selected = p.selected;
-                if (p.rows.len == 0) {
-                    self.closePicker();
-                    return;
-                }
-                var usable: [ssh.MAX_HOSTS]ssh.Host = undefined;
-                const hosts = self.hosts.connectable(&usable);
-                if (selected < hosts.len) {
-                    const host = hosts[selected];
-                    self.closePicker();
-                    _ = self.tabs.addSsh(host, self.cols, self.rows) catch |err| {
-                        self.showToast("ssh failed: {s}", .{@errorName(err)});
-                        return;
-                    };
-                } else {
-                    self.closePicker();
-                }
-            },
+            sdl.SDLK_RETURN => self.connectSelected(),
             else => {},
         }
         self.swallow_text = true;
+    }
+
+    /// Opens the highlighted host in a new tab and dismisses the picker.
+    fn connectSelected(self: *App) void {
+        const p = self.picker orelse return;
+        const selected = p.selected;
+        self.closePicker();
+
+        var usable: [ssh.MAX_HOSTS]ssh.Host = undefined;
+        const hosts = self.hosts.connectable(&usable);
+        if (selected >= hosts.len) return;
+
+        _ = self.tabs.addSsh(hosts[selected], self.cols, self.rows) catch |err| {
+            self.showToast("ssh failed: {s}", .{@errorName(err)});
+        };
     }
 
     // -- toast -------------------------------------------------------------
