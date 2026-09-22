@@ -7,6 +7,7 @@ const term = @import("term");
 const theme = @import("theme");
 const ssh = @import("ssh");
 const rnd = @import("render");
+const appicon = @import("appicon");
 const font = @import("font");
 
 const log = std.log.scoped(.ztabb);
@@ -111,6 +112,7 @@ pub const App = struct {
         var renderer = try rnd.Renderer.init(gpa, sdl_renderer);
         errdefer renderer.deinit();
 
+        setAppIcon(gpa, window);
         sdl.startTextInput(window);
 
         // A missing or unreadable ~/.ssh/config is normal, not an error.
@@ -132,6 +134,16 @@ pub const App = struct {
         app.measure();
         _ = try app.tabs.addShell(app.cols, app.rows);
         return app;
+    }
+
+    /// Draws the app icon and hands it to the window manager. 512px is the
+    /// largest size macOS asks for in the Dock; it downsamples from there.
+    fn setAppIcon(gpa: std.mem.Allocator, window: *sdl.Window) void {
+        const size: u32 = 512;
+        const pixels = gpa.alloc(u32, size * size) catch return;
+        defer gpa.free(pixels);
+        appicon.render(size, pixels);
+        sdl.setWindowIcon(window, pixels, @intCast(size));
     }
 
     pub fn deinit(self: *App) void {

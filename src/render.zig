@@ -21,6 +21,11 @@ pub const TAB_WIDTH_CELLS: u32 = 18;
 const TAB_MIN_CELLS: u32 = 8;
 const TAB_CLOSE_CELLS: u32 = 3;
 const PLUS_CELLS: u32 = 3;
+/// Space before the tab's icon, and between that icon and the label, in
+/// terminal cells.
+const TAB_PAD_CELLS: f32 = 0.6;
+const TAB_GAP_CELLS: f32 = 0.55;
+
 /// The SSH button beside "+". Wide enough to carry the larger icon: it is the
 /// entry point to every saved connection, not a decoration.
 const SSH_CELLS: u32 = 4;
@@ -523,30 +528,34 @@ pub const Renderer = struct {
 
             const fg = if (is_active) th.tab_active_fg else th.tab_inactive_fg;
 
-            // A server or prompt icon marks what kind of tab this is; the
-            // label then starts one cell further in.
+            // A globe or prompt icon marks what kind of tab this is, set in
+            // from the edge and given room before the label starts.
             self.drawIcon(
                 if (tab.kind == .ssh) .remote else .terminal,
-                x + cw / 4,
+                x + TAB_PAD_CELLS * cw,
                 0,
-                cw * 1.5,
+                self.iconDrawSize(),
                 bar_h,
                 if (is_active) th.ansi[4] else th.tab_inactive_fg,
                 1.0,
             );
 
-            var name_buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
-            var label_buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
             // The label is set in the smaller interface face, so its budget is
             // counted in that cell rather than the terminal's.
-            const label_x = x + cw * 2;
+            const label_x = x + TAB_PAD_CELLS * cw + self.iconDrawSize() + TAB_GAP_CELLS * cw;
             const room = tab_w - (label_x - x) - if (bar.hasClose())
                 cw * @as(f32, @floatFromInt(TAB_CLOSE_CELLS))
             else
                 cw / 2;
             const budget: u32 = @intFromFloat(@max(0, room / self.uiCellW()));
-            const label = fitLabel(&label_buf, "", tab.displayName(&name_buf), budget);
-            _ = self.drawUiText(label, label_x, (bar_h - self.uiCellH()) / 2, fg);
+            self.drawTabLabel(
+                tab.labelParts(),
+                label_x,
+                (bar_h - self.uiCellH()) / 2,
+                budget,
+                fg,
+                th.tab_inactive_fg,
+            );
 
             if (bar.hasClose()) {
                 self.drawIcon(
@@ -598,6 +607,40 @@ pub const Renderer = struct {
     }
 
     // -- overlays ----------------------------------------------------------
+
+    /// Draws a split label: the path dim, the directory bright.
+    ///
+    /// When the parts do not fit, the trailing context goes first and the
+    /// leading path is elided from the left, because the last component is
+    /// what tells two tabs apart.
+    fn drawTabLabel(
+        self: *Renderer,
+        parts: tabs_mod.Tab.Label,
+        x: f32,
+        y: f32,
+        budget: u32,
+        bright: u32,
+        dim: u32,
+    ) void {
+        const fitted = fitParts(parts, budget);
+        var at = x;
+        var buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
+
+        if (fitted.prefix.len > 0) {
+            const text = if (fitted.elided) blk: {
+                const ell = "\u{2026}";
+                @memcpy(buf[0..ell.len], ell);
+                @memcpy(buf[ell.len..][0..fitted.prefix.len], fitted.prefix);
+                break :blk buf[0 .. ell.len + fitted.prefix.len];
+            } else fitted.prefix;
+            at += self.drawUiText(text, at, y, dim);
+        }
+        at += self.drawUiText(fitted.name, at, y, bright);
+        if (fitted.suffix.len > 0) {
+            at += self.uiCellW();
+            _ = self.drawUiText(fitted.suffix, at, y, dim);
+        }
+    }
 
     /// Geometry of the host picker, shared by drawing and mouse hit testing.
     pub fn picker(self: *const Renderer, count: usize, width: f32, height: f32) Picker {
@@ -746,6 +789,42 @@ pub const HighlightOverlay = struct {
         return self.colors[i];
     }
 };
+
+pub const FittedLabel = struct {
+    prefix: []const u8 = "",
+    name: []const u8 = "",
+    suffix: []const u8 = "",
+    /// The prefix was cut from the left and wants an ellipsis in front of it.
+    elided: bool = false,
+};
+
+/// Trims a split label down to `budget` cells, giving up the least useful part
+/// first: the trailing context, then the leading path, and only then the name.
+pub fn fitParts(parts: tabs_mod.Tab.Label, budget: u32) FittedLabel {
+    var out = FittedLabel{ .prefix = parts.prefix, .name = parts.name, .suffix = parts.suffix };
+    if (budget == 0) return .{};
+
+    // The suffix is context; drop it whole rather than cutting into it.
+    if (cellLen(out.prefix) + cellLen(out.name) + cellLen(out.suffix) + 1 > budget) {
+        out.suffix = "";
+    }
+    if (cellLen(out.prefix) + cellLen(out.name) <= budget) return out;
+
+    // Cut the path from the left, keeping the components nearest the name.
+    const name_cells = cellLen(out.name);
+    if (name_cells + 2 <= budget) {
+        const room = budget - name_cells - 1; // one cell for the ellipsis
+        out.prefix = tailCells(out.prefix, room);
+        out.elided = true;
+        return out;
+    }
+
+    // Not even the name fits: keep its tail, which is the part that differs.
+    out.prefix = "";
+    out.elided = false;
+    out.name = tailCells(out.name, budget);
+    return out;
+}
 
 /// Builds a tab label that fits `budget` cells, eliding the middle of a long
 /// name so both the leading context and the trailing component stay visible.
@@ -1043,6 +1122,69 @@ test "every point in the bar resolves without panicking" {
                 .tab, .close => |i| try testing.expect(i < count),
                 .new_tab, .ssh_menu, .none => {},
             }
+        }
+    }
+}
+
+fn label(prefix: []const u8, name: []const u8, suffix: []const u8) tabs_mod.Tab.Label {
+    return .{ .prefix = prefix, .name = name, .suffix = suffix };
+}
+
+test "a label that fits is left alone" {
+    const f = fitParts(label("~/projects/", "ztabb", ""), 40);
+    try testing.expectEqualStrings("~/projects/", f.prefix);
+    try testing.expectEqualStrings("ztabb", f.name);
+    try testing.expect(!f.elided);
+}
+
+test "the trailing context is the first thing dropped" {
+    const f = fitParts(label("", "prod", "some/long/remote/dir"), 10);
+    try testing.expectEqualStrings("prod", f.name);
+    try testing.expectEqualStrings("", f.suffix);
+}
+
+test "the path is cut from the left, keeping what is nearest the name" {
+    const f = fitParts(label("~/a/b/c/", "ztabb", ""), 12);
+    try testing.expect(f.elided);
+    try testing.expectEqualStrings("ztabb", f.name);
+    // What survives is the tail of the path, not its head.
+    try testing.expect(std.mem.endsWith(u8, f.prefix, "c/"));
+    try testing.expect(cellLen(f.prefix) + cellLen(f.name) + 1 <= 12);
+}
+
+test "the name is never sacrificed while it still fits" {
+    const f = fitParts(label("~/very/long/path/", "ztabb", ""), 8);
+    try testing.expectEqualStrings("ztabb", f.name);
+    try testing.expect(cellLen(f.prefix) + cellLen(f.name) + 1 <= 8);
+}
+
+test "a name too long for the tab keeps its tail" {
+    const f = fitParts(label("~/x/", "averylongdirectoryname", ""), 6);
+    try testing.expectEqualStrings("", f.prefix);
+    try testing.expectEqual(@as(u32, 6), cellLen(f.name));
+    try testing.expect(std.mem.endsWith(u8, "averylongdirectoryname", f.name));
+}
+
+test "a zero budget draws nothing" {
+    const f = fitParts(label("~/a/", "b", "c"), 0);
+    try testing.expectEqual(@as(usize, 0), f.prefix.len + f.name.len + f.suffix.len);
+}
+
+test "fitParts never exceeds its budget" {
+    const cases = [_]tabs_mod.Tab.Label{
+        label("~/projects/", "ztabb", ""),
+        label("", "prod", "app"),
+        label("/usr/local/share/", "doc", ""),
+        label("", "htop", ""),
+        label("~/", "Привет", ""),
+    };
+    for (cases) |c| {
+        for (1..40) |budget| {
+            const f = fitParts(c, @intCast(budget));
+            var used = cellLen(f.prefix) + cellLen(f.name);
+            if (f.elided) used += 1;
+            if (f.suffix.len > 0) used += cellLen(f.suffix) + 1;
+            try testing.expect(used <= budget);
         }
     }
 }

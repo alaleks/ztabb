@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
     const theme_mod = mod(b, "src/theme.zig", target, optimize);
     const font_mod = mod(b, "src/font.zig", target, optimize);
     const icons_mod = mod(b, "src/icons.zig", target, optimize);
+    const appicon_mod = mod(b, "src/appicon.zig", target, optimize);
+    const png_mod = mod(b, "src/png.zig", target, optimize);
     const pty_mod = mod(b, "src/pty.zig", target, optimize);
     const ssh_mod = mod(b, "src/ssh.zig", target, optimize);
 
@@ -51,6 +53,7 @@ pub fn build(b: *std.Build) void {
     app_mod.addImport("theme", theme_mod);
     app_mod.addImport("ssh", ssh_mod);
     app_mod.addImport("render", render_mod);
+    app_mod.addImport("appicon", appicon_mod);
     app_mod.addImport("font", font_mod);
 
     const main_mod = mod(b, "src/main.zig", target, optimize);
@@ -64,11 +67,37 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     b.step("run", "Run ztabb").dependOn(&run_cmd.step);
 
+    // `zig build icon` renders the icon at every size an .icns carries and
+    // hands the directory to iconutil; `zig build bundle` wraps the binary and
+    // that icon into ztabb.app, which is what macOS needs to show the icon in
+    // the Dock and Finder rather than only while the program runs.
+    const mkiconset_mod = mod(b, "tools/mkiconset.zig", b.graph.host, .Debug);
+    mkiconset_mod.addImport("appicon", appicon_mod);
+    mkiconset_mod.addImport("png", png_mod);
+    const mkiconset = b.addExecutable(.{ .name = "mkiconset", .root_module = mkiconset_mod });
+
+    const iconset_dir = "zig-out/ztabb.iconset";
+    const run_mkiconset = b.addRunArtifact(mkiconset);
+    run_mkiconset.addArg(iconset_dir);
+
+    const iconutil = b.addSystemCommand(&.{ "iconutil", "-c", "icns", "-o", "zig-out/ztabb.icns", iconset_dir });
+    iconutil.step.dependOn(&run_mkiconset.step);
+    const icon_step = b.step("icon", "Render zig-out/ztabb.icns");
+    icon_step.dependOn(&iconutil.step);
+
+    const bundle = b.addSystemCommand(&.{ "sh", "tools/bundle.sh" });
+    bundle.step.dependOn(&iconutil.step);
+    bundle.step.dependOn(b.getInstallStep());
+    const bundle_step = b.step("bundle", "Build zig-out/ztabb.app");
+    bundle_step.dependOn(&bundle.step);
+
     const test_step = b.step("test", "Run unit tests");
     const suites = [_]struct { name: []const u8, module: *std.Build.Module }{
         .{ .name = "theme", .module = theme_mod },
         .{ .name = "font", .module = font_mod },
         .{ .name = "icons", .module = icons_mod },
+        .{ .name = "appicon", .module = appicon_mod },
+        .{ .name = "png", .module = png_mod },
         .{ .name = "terminal", .module = term_mod },
         .{ .name = "highlight", .module = highlight_mod },
         .{ .name = "ssh", .module = ssh_mod },

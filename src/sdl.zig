@@ -9,6 +9,7 @@ const std = @import("std");
 pub const Window = opaque {};
 pub const Renderer = opaque {};
 pub const Texture = opaque {};
+pub const Surface = opaque {};
 
 pub const INIT_VIDEO: u32 = 0x20;
 
@@ -228,6 +229,9 @@ extern "c" fn SDL_StopTextInput(window: ?*Window) bool;
 extern "c" fn SDL_GetWindowSize(window: ?*Window, w: *c_int, h: *c_int) bool;
 extern "c" fn SDL_GetRenderOutputSize(renderer: ?*Renderer, w: *c_int, h: *c_int) bool;
 extern "c" fn SDL_SetWindowTitle(window: ?*Window, title: [*:0]const u8) bool;
+extern "c" fn SDL_CreateSurfaceFrom(w: c_int, h: c_int, format: u32, pixels: *anyopaque, pitch: c_int) ?*Surface;
+extern "c" fn SDL_DestroySurface(surface: ?*Surface) void;
+extern "c" fn SDL_SetWindowIcon(window: ?*Window, icon: ?*Surface) bool;
 extern "c" fn SDL_GetClipboardText() [*:0]u8;
 extern "c" fn SDL_SetClipboardText(text: [*:0]const u8) bool;
 extern "c" fn SDL_free(mem: ?*anyopaque) void;
@@ -266,6 +270,20 @@ pub fn destroyWindow(win: ?*Window) void {
 
 pub fn setWindowTitle(win: ?*Window, title: [*:0]const u8) void {
     _ = SDL_SetWindowTitle(win, title);
+}
+
+/// Sets the window's (and on macOS the Dock's) icon from ARGB pixels. The
+/// surface only borrows `pixels`, so it is destroyed before returning.
+pub fn setWindowIcon(win: ?*Window, pixels: []u32, size: i32) void {
+    const surface = SDL_CreateSurfaceFrom(
+        size,
+        size,
+        PIXELFORMAT_ARGB8888,
+        @ptrCast(pixels.ptr),
+        size * 4,
+    ) orelse return;
+    defer SDL_DestroySurface(surface);
+    _ = SDL_SetWindowIcon(win, surface);
 }
 
 pub fn createRenderer(win: ?*Window) Error!*Renderer {

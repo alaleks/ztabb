@@ -19,6 +19,23 @@ pub const Tab = struct {
     label: [MAX_LABEL]u8,
     label_len: usize,
 
+    /// A tab label split into the part that carries the identity and the part
+    /// that is only context. The renderer draws `name` in the foreground
+    /// colour and the rest greyed, so the eye lands on the directory rather
+    /// than on the path leading to it.
+    pub const Label = struct {
+        /// Drawn dim, before the name.
+        prefix: []const u8 = "",
+        /// Drawn bright: the directory, or the ssh profile.
+        name: []const u8 = "",
+        /// Drawn dim, after the name.
+        suffix: []const u8 = "",
+
+        pub fn len(self: Label) usize {
+            return self.prefix.len + self.name.len + self.suffix.len;
+        }
+    };
+
     /// The name the tab was opened under: the ssh profile, or the shell.
     ///
     /// For an ssh tab this always wins over the window title: the remote shell
@@ -36,21 +53,41 @@ pub const Tab = struct {
 
     /// What the tab bar shows.
     ///
-    /// An ssh tab leads with its profile and appends the folder when it fits;
-    /// a shell tab shows the folder it is sitting in, falling back to the
-    /// shell's name before it has set a title.
-    pub fn displayName(self: *const Tab, buf: []u8) []const u8 {
-        const folder = self.folderName();
-        if (self.kind != .ssh) {
-            if (folder.len > 0) return folder;
-            const title = self.terminal.titleSlice();
-            if (title.len > 0) return title[0..@min(title.len, MAX_LABEL)];
-            return self.profileName();
+    /// An ssh tab leads with its profile and trails the remote directory; a
+    /// shell tab shows the directory it is sitting in, preceded by its parent
+    /// so two tabs in sibling directories can be told apart.
+    pub fn labelParts(self: *const Tab) Label {
+        if (self.kind == .ssh) {
+            return .{ .name = self.profileName(), .suffix = self.folderName() };
         }
 
-        const profile = self.profileName();
-        if (folder.len == 0) return profile;
-        return std.fmt.bufPrint(buf, "{s} {s}", .{ profile, folder }) catch profile;
+        const title = self.terminal.titleSlice();
+        const path = pathOf(title);
+        if (path.len == 0) return .{ .name = self.profileName() };
+
+        const leaf = folderOf(title);
+        if (leaf.len == 0 or leaf.len >= path.len) return .{ .name = path };
+        // Everything up to and including the slash before the leaf.
+        return .{ .prefix = path[0 .. path.len - leaf.len], .name = leaf };
+    }
+
+    /// The label as one string, for the window title.
+    pub fn displayName(self: *const Tab, buf: []u8) []const u8 {
+        const parts = self.labelParts();
+        var n: usize = 0;
+        for ([_][]const u8{ parts.prefix, parts.name }) |part| {
+            const room = @min(buf.len - n, part.len);
+            @memcpy(buf[n..][0..room], part[0..room]);
+            n += room;
+        }
+        if (parts.suffix.len > 0 and n < buf.len) {
+            buf[n] = ' ';
+            n += 1;
+            const room = @min(buf.len - n, parts.suffix.len);
+            @memcpy(buf[n..][0..room], parts.suffix[0..room]);
+            n += room;
+        }
+        return buf[0..n];
     }
 
     fn setLabel(self: *Tab, name: []const u8) void {
@@ -60,9 +97,9 @@ pub const Tab = struct {
     }
 };
 
-/// The last path component of a window title such as `user@host:~/src/app`,
-/// `~/src/app` or `app — zsh`. Empty when nothing path-like is in there.
-pub fn folderOf(title: []const u8) []const u8 {
+/// The path buried in a window title such as `user@host:~/src/app`,
+/// `~/src/app` or `app — zsh`, with the decoration stripped off.
+pub fn pathOf(title: []const u8) []const u8 {
     var s = std.mem.trim(u8, title, " \t");
     if (s.len == 0) return "";
 
@@ -72,14 +109,19 @@ pub fn folderOf(title: []const u8) []const u8 {
     }
     // `user@host:path` -- keep the path.
     if (std.mem.lastIndexOfScalar(u8, s, ':')) |at| s = s[at + 1 ..];
-    if (s.len == 0) return "";
-    // A title that is not a path at all (`vim`, `htop`) is left as it is.
-    if (std.mem.indexOfScalar(u8, s, '/') == null) return s;
-
+    s = std.mem.trim(u8, s, " ");
     // Trailing slashes name the same directory as the component before them.
     while (s.len > 1 and s[s.len - 1] == '/') s = s[0 .. s.len - 1];
+    return s;
+}
+
+/// The last component of that path. A title that is not a path at all
+/// (`vim`, `htop`) is its own last component.
+pub fn folderOf(title: []const u8) []const u8 {
+    const s = pathOf(title);
+    if (s.len == 0) return "";
     if (std.mem.eql(u8, s, "/")) return "/";
-    const at = std.mem.lastIndexOfScalar(u8, s, '/').?;
+    const at = std.mem.lastIndexOfScalar(u8, s, '/') orelse return s;
     const base = s[at + 1 ..];
     return if (base.len > 0) base else s;
 }
@@ -413,15 +455,38 @@ test "a tab is labelled by how it was opened" {
     try testing.expectEqualStrings("zsh", tabs.active().?.displayName(&name_buf));
 }
 
-test "a shell tab shows the folder it is sitting in" {
+test "a shell tab shows its directory under the path leading to it" {
     var tabs = Tabs.init(testing.allocator);
     defer tabs.deinit();
     _ = try addTestTab(&tabs, "zsh", 80, 24);
     const tab = tabs.active().?;
-    var name_buf: [MAX_LABEL * 2]u8 = undefined;
 
     tab.terminal.write("\x1b]0;~/projects/ztabb\x07");
-    try testing.expectEqualStrings("ztabb", tab.displayName(&name_buf));
+    const parts = tab.labelParts();
+    // The directory is what the eye should land on; the path is context.
+    try testing.expectEqualStrings("ztabb", parts.name);
+    try testing.expectEqualStrings("~/projects/", parts.prefix);
+    try testing.expectEqualStrings("", parts.suffix);
+}
+
+test "a tab with no title yet falls back to the shell name" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "zsh", 80, 24);
+    const parts = tabs.active().?.labelParts();
+    try testing.expectEqualStrings("zsh", parts.name);
+    try testing.expectEqualStrings("", parts.prefix);
+}
+
+test "a title that is not a path is shown whole and bright" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "zsh", 80, 24);
+    const tab = tabs.active().?;
+    tab.terminal.write("\x1b]0;htop\x07");
+    const parts = tab.labelParts();
+    try testing.expectEqualStrings("htop", parts.name);
+    try testing.expectEqualStrings("", parts.prefix);
 }
 
 test "an ssh tab keeps showing its profile" {
@@ -435,11 +500,23 @@ test "an ssh tab keeps showing its profile" {
     var name_buf: [MAX_LABEL * 2]u8 = undefined;
 
     try testing.expectEqualStrings("prod", tab.displayName(&name_buf));
+    try testing.expectEqualStrings("prod", tab.labelParts().name);
 
     tab.terminal.write("\x1b]0;deploy@prod.example.com:~/app\x07");
     try testing.expectEqualStrings("prod app", tab.displayName(&name_buf));
+    // The profile stays the bright part; the remote directory trails it.
+    try testing.expectEqualStrings("prod", tab.labelParts().name);
+    try testing.expectEqualStrings("app", tab.labelParts().suffix);
     try testing.expectEqualStrings("prod", tab.profileName());
     try testing.expectEqualStrings("app", tab.folderName());
+}
+
+test "pathOf strips the decoration around a path" {
+    try testing.expectEqualStrings("~/projects/ztabb", pathOf("~/projects/ztabb"));
+    try testing.expectEqualStrings("~/srv/app", pathOf("deploy@prod:~/srv/app"));
+    try testing.expectEqualStrings("~/src/ztabb", pathOf("~/src/ztabb \u{2014} zsh"));
+    try testing.expectEqualStrings("~/projects/ztabb", pathOf("~/projects/ztabb/"));
+    try testing.expectEqualStrings("", pathOf(""));
 }
 
 test "folderOf pulls the last component out of a window title" {

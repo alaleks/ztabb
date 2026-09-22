@@ -30,3 +30,6 @@ zig-out/
 # Coverage / profiling
 *.prof
 *.cov
+
+# Generated app bundle artifacts
+*.iconset/
