@@ -19,14 +19,14 @@ const INSET: f32 = 0.06;
 
 /// The ground, top-left to bottom-right: the terminal's own dark, lifted a
 /// little at the top so the square reads as a surface rather than a hole.
-const GRAD_FROM: [3]f32 = .{ 0x35, 0x3A, 0x44 };
-const GRAD_TO: [3]f32 = .{ 0x21, 0x24, 0x2A };
+const GRAD_FROM: [3]f32 = .{ 0x3A, 0x3F, 0x4A };
+const GRAD_TO: [3]f32 = .{ 0x26, 0x2A, 0x31 };
 /// The prompt. Bright enough to carry at 16px against that ground, which is
 /// the whole job of the mark.
 const MARK: [3]f32 = .{ 0x4F, 0xE0, 0xC4 };
 /// A hairline along the top edge, so the icon does not dissolve into a dark
 /// Dock the way a flat dark square does.
-const RIM: [3]f32 = .{ 0x4A, 0x51, 0x5C };
+const RIM: [3]f32 = .{ 0x51, 0x59, 0x65 };
 
 const Point = struct { x: f32, y: f32 };
 
