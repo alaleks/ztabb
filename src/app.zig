@@ -101,7 +101,9 @@ pub const App = struct {
         try sdl.init();
         errdefer sdl.quit();
 
-        const window = try sdl.createWindow("ztabb", 960, 600);
+        // Borderless: the title strip is drawn by ztabb, because the system
+        // one carries neither an icon, nor two colours, nor a chosen face.
+        const window = try sdl.createWindow("ztabb", 960, 600, true);
         errdefer sdl.destroyWindow(window);
 
         const sdl_renderer = try sdl.createRenderer(window);
@@ -114,6 +116,7 @@ pub const App = struct {
         errdefer renderer.deinit();
 
         setAppIcon(gpa, window);
+        sdl.setWindowHitTest(window, hitTest);
         sdl.startTextInput(window);
 
         // A missing or unreadable ~/.ssh/config is normal, not an error.
@@ -160,6 +163,40 @@ pub const App = struct {
         self.gpa.destroy(self.io_backend);
     }
 
+    /// Tells the window manager which parts of the borderless window drag or
+    /// resize it. Called on the UI thread with window points.
+    ///
+    /// Only the bare title strip drags: the tabs, the buttons on it and the
+    /// terminal all have their own jobs.
+    fn hitTest(win: ?*sdl.Window, area: *const sdl.Point, data: ?*anyopaque) callconv(.c) c_int {
+        _ = data;
+        var w: i32 = 0;
+        var h: i32 = 0;
+        sdl.getWindowSize(win, &w, &h);
+
+        const edge = 4;
+        const x = area.x;
+        const y = area.y;
+        if (x < edge) {
+            if (y < edge) return sdl.HITTEST_RESIZE_TOPLEFT;
+            if (y >= h - edge) return sdl.HITTEST_RESIZE_BOTTOMLEFT;
+            return sdl.HITTEST_RESIZE_LEFT;
+        }
+        if (x >= w - edge) {
+            if (y < edge) return sdl.HITTEST_RESIZE_TOPRIGHT;
+            if (y >= h - edge) return sdl.HITTEST_RESIZE_BOTTOMRIGHT;
+            return sdl.HITTEST_RESIZE_RIGHT;
+        }
+        if (y < edge) return sdl.HITTEST_RESIZE_TOP;
+        if (y >= h - edge) return sdl.HITTEST_RESIZE_BOTTOM;
+
+        // The strip height is in pixels; this callback speaks points.
+        if (y < title_bar_points and !title_controls.contains(area.x, area.y)) {
+            return sdl.HITTEST_DRAGGABLE;
+        }
+        return sdl.HITTEST_NORMAL;
+    }
+
     fn th(self: *const App) *const theme.Theme {
         return theme.byKind(self.theme_kind);
     }
@@ -188,9 +225,18 @@ pub const App = struct {
 
         const cw: i32 = @intCast(self.renderer.cellW());
         const ch: i32 = @intCast(self.renderer.cellH());
-        const bar = ch * @as(i32, @intCast(rnd.TAB_BAR_CELLS));
+        const chrome = ch * @as(i32, @intCast(rnd.TAB_BAR_CELLS + rnd.TITLE_BAR_CELLS));
         self.cols = @intCast(@max(1, @divTrunc(px_w, cw)));
-        self.rows = @intCast(@max(1, @divTrunc(px_h - bar, ch)));
+        self.rows = @intCast(@max(1, @divTrunc(px_h - chrome, ch)));
+
+        // The hit test speaks window points, so convert out of pixels once.
+        const scale = @max(self.dpi_scale, 1);
+        title_bar_points = @intCast(@divTrunc(@as(i32, @intCast(self.renderer.cellH() * rnd.TITLE_BAR_CELLS)), @as(i32, @intCast(scale))));
+        const controls_px = rnd.TitleBar.controlsWidth(self.renderer.titleBarH());
+        title_controls = .{
+            .w = controls_px / @as(f32, @floatFromInt(scale)),
+            .h = @floatFromInt(title_bar_points),
+        };
     }
 
     fn applyGeometry(self: *App) void {
@@ -372,8 +418,21 @@ pub const App = struct {
             return;
         }
 
+        // The window controls sit on the title strip, above the tabs.
+        const title_h = self.renderer.titleBarH();
+        if (y < title_h) {
+            if (rnd.TitleBar.hit(title_h, x, y)) |control| switch (control) {
+                .close => self.running = false,
+                .minimize => sdl.minimizeWindow(self.window),
+                .zoom => sdl.toggleMaximize(self.window),
+            };
+            // Anywhere else on the strip is the drag region, which the window
+            // manager handles through the hit test.
+            return;
+        }
+
         const bar = self.renderer.tabBar(self.tabs.count, @floatFromInt(self.win_w));
-        switch (bar.hit(x, y)) {
+        switch (bar.hit(x, y - title_h)) {
             .new_tab => self.newShellTab(),
             .ssh_menu => self.openPicker(),
             .tab => |i| self.tabs.switchTo(i) catch {},
@@ -536,9 +595,17 @@ pub const App = struct {
 
         const width: f32 = @floatFromInt(self.win_w);
         const height: f32 = @floatFromInt(self.win_h);
-        const bar_h: f32 = @floatFromInt(self.renderer.cellH() * rnd.TAB_BAR_CELLS);
+        const title_h = self.renderer.titleBarH();
+        const bar_h = title_h + @as(f32, @floatFromInt(self.renderer.cellH() * rnd.TAB_BAR_CELLS));
 
-        self.renderer.drawTabBar(&self.tabs, th_, width);
+        const active = self.tabs.active();
+        self.renderer.drawTitleBar(
+            if (active) |tab| tab.labelParts().name else "ztabb",
+            if (active) |tab| (if (tab.kind == .ssh) .remote else .terminal) else .terminal,
+            th_,
+            width,
+        );
+        self.renderer.drawTabBar(&self.tabs, th_, width, title_h);
 
         if (self.tabs.active()) |tab| {
             var text_buf: [512]u8 = undefined;
@@ -577,6 +644,21 @@ pub const App = struct {
         @memcpy(self.title_buf[0..written.len], written);
         self.title_buf[written.len] = 0;
         sdl.setWindowTitle(self.window, &self.title_buf);
+    }
+};
+
+/// Title strip geometry in window points, published for the hit test: the
+/// window manager calls that callback without a handle to the app.
+var title_bar_points: i32 = 28;
+var title_controls: ControlBox = .{};
+
+/// The area the window controls occupy, in window points.
+const ControlBox = struct {
+    w: f32 = 0,
+    h: f32 = 0,
+
+    fn contains(self: ControlBox, x: i32, y: i32) bool {
+        return @as(f32, @floatFromInt(x)) < self.w and @as(f32, @floatFromInt(y)) < self.h;
     }
 };
 
