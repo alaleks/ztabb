@@ -93,6 +93,22 @@ pub fn build(b: *std.Build) void {
     const icon_step = b.step("icon", "Render zig-out/ztabb.icns");
     icon_step.dependOn(&iconutil.step);
 
+    const mklogo_mod = mod(b, "tools/mklogo.zig", b.graph.host, .Debug);
+    mklogo_mod.addImport("appicon", appicon_mod);
+    mklogo_mod.addImport("png", png_mod);
+    const mklogo = b.addExecutable(.{ .name = "mklogo", .root_module = mklogo_mod });
+    const run_mklogo = b.addRunArtifact(mklogo);
+    run_mklogo.addArg("zig-out/logo");
+    // ffmpeg turns the two frames into the blinking mark the README shows.
+    const logo_gif = b.addSystemCommand(&.{
+        "ffmpeg",           "-y",                                                                        "-loglevel", "error",
+        "-framerate",       "1.6",                                                                       "-i",        "zig-out/logo/logo-%d.png",
+        "-vf",              "scale=256:256:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse", "-loop",     "0",
+        ".github/logo.gif",
+    });
+    logo_gif.step.dependOn(&run_mklogo.step);
+    b.step("logo", "Render .github/logo.gif").dependOn(&logo_gif.step);
+
     const bundle = b.addSystemCommand(&.{ "sh", "tools/bundle.sh" });
     bundle.step.dependOn(&iconutil.step);
     bundle.step.dependOn(b.getInstallStep());

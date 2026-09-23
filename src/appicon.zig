@@ -61,10 +61,10 @@ const chevron_b = p(0.285, 0.655);
 const rule_a = p(0.545, 0.655);
 const rule_b = p(0.735, 0.655);
 
-fn markDistance(x: f32, y: f32) f32 {
+fn markDistance(x: f32, y: f32, cursor: bool) f32 {
     var d = segmentDistance(x, y, chevron_a, chevron_tip);
     d = @min(d, segmentDistance(x, y, chevron_tip, chevron_b));
-    d = @min(d, segmentDistance(x, y, rule_a, rule_b));
+    if (cursor) d = @min(d, segmentDistance(x, y, rule_a, rule_b));
     return d - stroke_w / 2;
 }
 
@@ -84,6 +84,12 @@ fn gradientAt(t: f32) [3]f32 {
 ///
 /// Allocation-free; the caller owns the buffer.
 pub fn render(size: u32, out: []u32) void {
+    renderFrame(size, true, out);
+}
+
+/// `cursor` draws the rule beside the prompt. The logo blinks it, the same way
+/// a terminal does; the application icon always shows it.
+pub fn renderFrame(size: u32, cursor: bool, out: []u32) void {
     std.debug.assert(out.len >= size * size);
     const fsize: f32 = @floatFromInt(size);
     const feather = 1.2 / fsize;
@@ -109,7 +115,7 @@ pub fn render(size: u32, out: []u32) void {
             const rim = std.math.clamp(1 + edge / (2.5 / fsize), 0, 1) * body;
             for (&rgb, RIM) |*c, rim_c| c.* += (rim_c - c.*) * rim;
 
-            const mark = coverage(markDistance(x, y), feather);
+            const mark = coverage(markDistance(x, y, cursor), feather);
             var r = rgb[0] + (MARK[0] - rgb[0]) * mark;
             var g = rgb[1] + (MARK[1] - rgb[1]) * mark;
             var b = rgb[2] + (MARK[2] - rgb[2]) * mark;
@@ -141,6 +147,34 @@ fn lumaOf(px: u32) u32 {
 fn renderAt(size: u32, buf: []u32) []u32 {
     render(size, buf);
     return buf[0 .. size * size];
+}
+
+test "the cursor rule is what the two logo frames differ by" {
+    const gpa = testing.allocator;
+    const size: u32 = 128;
+    const on = try gpa.alloc(u32, size * size);
+    defer gpa.free(on);
+    const off = try gpa.alloc(u32, size * size);
+    defer gpa.free(off);
+    renderFrame(size, true, on);
+    renderFrame(size, false, off);
+
+    var differ: usize = 0;
+    for (on, off) |a, b| {
+        if (a != b) differ += 1;
+    }
+    try testing.expect(differ > 40);
+
+    // The chevron is in both; only the rule comes and goes.
+    const at = struct {
+        fn f(px: []const u32, s: u32, fx: f32, fy: f32) u32 {
+            const xi: usize = @intFromFloat(fx * @as(f32, @floatFromInt(s)));
+            const yi: usize = @intFromFloat(fy * @as(f32, @floatFromInt(s)));
+            return px[yi * s + xi];
+        }
+    }.f;
+    try testing.expectEqual(at(on, size, 0.47, 0.5), at(off, size, 0.47, 0.5));
+    try testing.expect(at(on, size, 0.63, 0.655) != at(off, size, 0.63, 0.655));
 }
 
 test "the icon renders at every size the system asks for" {

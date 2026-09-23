@@ -1,3 +1,5 @@
+<img src=".github/logo.gif" alt="ztabb" width="120" align="right">
+
 # ztabb
 
 A terminal that stays out of the way: one small native process, a bundled
@@ -240,11 +242,21 @@ src/
 tools/
 ├── genfont.c       typeface generator (only to re-bake it)
 ├── mkiconset.zig   renders the .iconset for iconutil
+├── mklogo.zig      renders the README logo frames
 └── bundle.sh       assembles ztabb.app
 ```
 
 Every module builds and tests on its own: `zig build test` runs eleven
 independent suites.
+
+### Regenerating the artwork
+
+The icon and the logo are drawn by the same code, so they cannot drift apart.
+
+```sh
+zig build icon     # zig-out/ztabb.icns
+zig build logo     # .github/logo.gif  (needs ffmpeg)
+```
 
 ### Re-baking the typeface
 
