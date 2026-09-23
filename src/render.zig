@@ -728,6 +728,7 @@ pub const Renderer = struct {
 
     /// Draws the title into the strip the system title bar left transparent:
     /// a terminal mark, the active tab bright, then the program name dimmed.
+    /// The dimming is what separates the two, so no punctuation between them.
     ///
     /// `inset` is where the window's own buttons end; the title starts there.
     pub fn drawTitle(
@@ -750,7 +751,7 @@ pub const Renderer = struct {
 
         const y = self.uiTextY(0, height);
         at += self.drawUiText(name, at, y, th.tab_active_fg);
-        _ = self.drawUiText(" / ztabb", at, y, th.tab_inactive_fg);
+        _ = self.drawUiText(" ztabb", at, y, th.tab_inactive_fg);
     }
 
     /// Geometry of the host picker, shared by drawing and mouse hit testing.
