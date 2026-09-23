@@ -533,6 +533,28 @@ pub const App = struct {
             return;
         }
 
+        // So does the host picker, and for the same reason: it is modal, and
+        // nothing behind it may answer a click aimed at it. It has to be asked
+        // before the mouse is offered to the program in the terminal below --
+        // taking it in the other order is what made the picker keyboard-only
+        // whenever whatever was running underneath had asked for the mouse.
+        if (self.picker) |p| {
+            self.ui_dirty = true;
+            if (ev.button != sdl.BUTTON_LEFT) return;
+            const layout = self.renderer.picker(
+                self.pickerRows(),
+                @floatFromInt(self.win_w),
+                @floatFromInt(self.win_h),
+            );
+            if (layout.hitRow(x, y, p.selected)) |i| {
+                self.picker.?.selected = i;
+                self.connectSelected();
+            } else {
+                self.closePicker();
+            }
+            return;
+        }
+
         if (ev.button == sdl.BUTTON_RIGHT) {
             // The right button opens the menu over the terminal only; the tab
             // bar and the title belong to the window.
@@ -548,21 +570,6 @@ pub const App = struct {
             if (self.reportMouse(ev.button - 1, x, y, true)) return;
         }
         if (ev.button != sdl.BUTTON_LEFT) return;
-
-        if (self.picker) |p| {
-            const layout = self.renderer.picker(
-                self.pickerRows(),
-                @floatFromInt(self.win_w),
-                @floatFromInt(self.win_h),
-            );
-            if (layout.hitRow(x, y, p.selected)) |i| {
-                self.picker.?.selected = i;
-                self.connectSelected();
-            } else {
-                self.closePicker();
-            }
-            return;
-        }
 
         // The title strip belongs to the window: clicks there drag it.
         if (y < self.title_h) return;
@@ -620,6 +627,9 @@ pub const App = struct {
 
     fn onMouseUp(self: *App, ev: sdl.MouseButtonEvent) void {
         self.dragging = false;
+        // A modal swallowed the press; the program must not be handed the
+        // release on its own, which it would read as a click it never saw begin.
+        if (self.picker != null or self.menu != null) return;
         const scale: f32 = self.density;
         const y = ev.y * scale;
         if (y >= self.chromeH() and !shiftHeld()) {
@@ -699,6 +709,10 @@ pub const App = struct {
     const WHEEL_LINES: i32 = 3;
 
     fn onWheel(self: *App, ev: sdl.MouseWheelEvent) void {
+        // The wheel belongs to whatever is in front. Neither overlay scrolls
+        // yet, so over one it does nothing rather than scrolling the terminal
+        // hidden behind it.
+        if (self.picker != null or self.menu != null) return;
         const tab = self.tabs.active() orelse return;
         const lines: i32 = @intFromFloat(@round(ev.y * @as(f32, WHEEL_LINES)));
         if (lines == 0) return;
