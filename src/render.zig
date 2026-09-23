@@ -887,6 +887,53 @@ pub const Renderer = struct {
         }
     }
 
+    /// Draws a context menu. `enabled` says which items can be chosen;
+    /// the rest are dimmed and do nothing.
+    pub fn drawMenu(
+        self: *Renderer,
+        box: Menu,
+        labels: []const []const u8,
+        enabled: []const bool,
+        hovered: ?usize,
+        th: *const theme.Theme,
+    ) void {
+        const x = box.x();
+        const y = box.y();
+        const hair = self.hairline();
+
+        self.fill(x - hair, y - hair, box.w() + hair * 2, box.h() + hair * 2, th.tab_border);
+        self.fill(x, y, box.w(), box.h(), th.tab_active_bg);
+
+        for (labels, 0..) |text, i| {
+            const row_y = box.rowY(i);
+            const on = i < enabled.len and enabled[i];
+            if (hovered == i and on) {
+                self.fill(x + hair, row_y, box.w() - hair * 2, box.rowH(), th.selection);
+            }
+            const fg = if (on) th.tab_active_fg else th.tab_inactive_fg;
+            _ = self.drawUiText(
+                text,
+                x + Menu.PAD_X * @as(f32, @floatFromInt(self.cellW())),
+                self.uiTextY(row_y, box.rowH()),
+                fg,
+            );
+        }
+    }
+
+    /// The geometry for a menu of `count` items at a point.
+    pub fn menuAt(self: *const Renderer, count: usize, label_cells: u32, at_x: f32, at_y: f32, width: f32, height: f32) Menu {
+        return .{
+            .cell_w = self.uiCellW(),
+            .cell_h = self.uiCellH(),
+            .at_x = at_x,
+            .at_y = at_y,
+            .width = width,
+            .height = height,
+            .count = count,
+            .label_cells = label_cells,
+        };
+    }
+
     /// A transient message strip at the bottom of the window.
     pub fn drawToast(self: *Renderer, text: []const u8, th: *const theme.Theme, width: f32, height: f32) void {
         const cw: f32 = @floatFromInt(self.cellW());
@@ -959,6 +1006,63 @@ pub const Picker = struct {
         const i: usize = @intFromFloat((y - top) / self.cell_h);
         if (i >= self.visible()) return null;
         return self.firstVisible(selected) + i;
+    }
+};
+
+/// A context menu: where it sits and what is under a point.
+///
+/// Pure geometry, like the tab bar and the host picker, so the hit testing can
+/// be checked without a window.
+pub const Menu = struct {
+    cell_w: f32,
+    cell_h: f32,
+    /// Where the pointer was when the menu was asked for.
+    at_x: f32,
+    at_y: f32,
+    /// The window, so the menu can be kept inside it.
+    width: f32,
+    height: f32,
+    count: usize,
+    /// Cells taken by the longest label.
+    label_cells: u32,
+
+    const PAD_X: f32 = 1.0;
+    const ROW_CELLS: f32 = 1.35;
+
+    pub fn rowH(self: Menu) f32 {
+        return @round(self.cell_h * ROW_CELLS);
+    }
+
+    pub fn w(self: Menu) f32 {
+        return (@as(f32, @floatFromInt(self.label_cells)) + PAD_X * 2) * self.cell_w;
+    }
+
+    pub fn h(self: Menu) f32 {
+        return self.rowH() * @as(f32, @floatFromInt(self.count)) + self.cell_h / 2;
+    }
+
+    /// The menu opens at the pointer, then is pulled back inside the window
+    /// rather than being allowed to hang off an edge.
+    pub fn x(self: Menu) f32 {
+        return @max(0, @min(self.at_x, self.width - self.w()));
+    }
+
+    pub fn y(self: Menu) f32 {
+        return @max(0, @min(self.at_y, self.height - self.h()));
+    }
+
+    pub fn rowY(self: Menu, i: usize) f32 {
+        return self.y() + self.cell_h / 4 + self.rowH() * @as(f32, @floatFromInt(i));
+    }
+
+    /// The item under a point, or null when the point missed the menu.
+    pub fn hit(self: Menu, px: f32, py: f32) ?usize {
+        if (px < self.x() or px >= self.x() + self.w()) return null;
+        if (py < self.y() or py >= self.y() + self.h()) return null;
+        const first = self.rowY(0);
+        if (py < first) return null;
+        const i: usize = @intFromFloat((py - first) / self.rowH());
+        return if (i < self.count) i else null;
     }
 };
 
@@ -1428,6 +1532,65 @@ test "fitParts never exceeds its budget" {
             if (f.suffix.len > 0) used += cellLen(f.suffix) + 1;
             try testing.expect(used <= budget);
         }
+    }
+}
+
+fn testMenu(count: usize) Menu {
+    return .{
+        .cell_w = 8,
+        .cell_h = 16,
+        .at_x = 100,
+        .at_y = 100,
+        .width = 800,
+        .height = 600,
+        .count = count,
+        .label_cells = 16,
+    };
+}
+
+test "a menu opens at the pointer" {
+    const m = testMenu(4);
+    try testing.expectEqual(@as(f32, 100), m.x());
+    try testing.expectEqual(@as(f32, 100), m.y());
+}
+
+test "a menu near an edge is pulled back inside the window" {
+    // Opening at the bottom right must not put half the items off-screen.
+    var m = testMenu(5);
+    m.at_x = 790;
+    m.at_y = 590;
+    try testing.expect(m.x() + m.w() <= 800);
+    try testing.expect(m.y() + m.h() <= 600);
+    try testing.expect(m.x() >= 0 and m.y() >= 0);
+}
+
+test "a menu larger than the window still starts on screen" {
+    var m = testMenu(20);
+    m.height = 100;
+    try testing.expectEqual(@as(f32, 0), m.y());
+}
+
+test "each item answers its own row" {
+    const m = testMenu(4);
+    for (0..4) |i| {
+        const mid = m.rowY(i) + m.rowH() / 2;
+        try testing.expectEqual(i, m.hit(m.x() + 10, mid).?);
+    }
+}
+
+test "a click outside the menu chooses nothing" {
+    const m = testMenu(3);
+    try testing.expect(m.hit(m.x() - 1, m.rowY(0) + 2) == null);
+    try testing.expect(m.hit(m.x() + m.w(), m.rowY(0) + 2) == null);
+    try testing.expect(m.hit(m.x() + 10, m.y() - 1) == null);
+    try testing.expect(m.hit(m.x() + 10, m.y() + m.h()) == null);
+}
+
+test "every point inside a menu resolves to a real item or to nothing" {
+    const m = testMenu(5);
+    var py = m.y();
+    while (py < m.y() + m.h()) : (py += 1) {
+        if (m.hit(m.x() + 4, py)) |i| try testing.expect(i < m.count);
     }
 }
 

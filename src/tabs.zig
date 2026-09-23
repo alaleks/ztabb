@@ -66,8 +66,12 @@ pub const Tab = struct {
     }
 
     fn titleSlice(self: *const Tab) []const u8 {
-        const p = self.slots[self.focused] orelse return "";
-        return p.terminal.titleSlice();
+        // Captured by pointer. Unwrapping the optional by value copies the
+        // whole pane, terminal and all, and the title slice would point into
+        // that copy -- which dies on return, leaving a slice that sometimes
+        // still reads correctly and sometimes does not.
+        if (self.slots[self.focused]) |*p| return p.terminal.titleSlice();
+        return "";
     }
 
     /// The pane the keyboard is talking to.

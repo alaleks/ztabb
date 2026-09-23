@@ -84,6 +84,7 @@ pub const App = struct {
     /// The range the mouse is drawing, or has drawn, over the terminal.
     selection: ?term.Selection = null,
     dragging: bool = false,
+    menu: ?MenuState = null,
     picker: ?Picker = null,
     picker_rows: [ssh.MAX_HOSTS]rnd.HostRow = undefined,
     toast: ?Toast = null,
@@ -93,6 +94,25 @@ pub const App = struct {
     const Picker = struct {
         selected: usize = 0,
         count: usize = 0,
+    };
+
+    /// What the right-button menu offers. Ordered as the menu draws them.
+    const MenuItem = enum { copy, paste, split_right, split_down, close_pane };
+
+    const menu_labels = [_][]const u8{
+        "Copy",
+        "Paste",
+        "Split right",
+        "Split down",
+        "Close pane",
+    };
+    /// The longest label, in cells, which is what sets the menu's width.
+    const menu_cells: u32 = 11;
+
+    const MenuState = struct {
+        x: f32,
+        y: f32,
+        hovered: ?usize = null,
     };
 
     const Toast = struct {
@@ -286,6 +306,13 @@ pub const App = struct {
         // Only the press in flight may claim the text event that follows it.
         self.text_gate.keyPressed();
 
+        if (self.menu != null) {
+            // Any key dismisses it; Escape is just the obvious one.
+            self.menu = null;
+            self.ui_dirty = true;
+            if (key == sdl.SDLK_ESCAPE) return;
+        }
+
         if (self.picker != null) {
             self.pickerKey(key);
             return;
@@ -390,11 +417,28 @@ pub const App = struct {
     /// Mouse positions arrive in window points; the grid is laid out in
     /// backbuffer pixels, so they have to be scaled on a HiDPI display.
     fn onMouseDown(self: *App, ev: sdl.MouseButtonEvent) void {
-        if (ev.button != sdl.BUTTON_LEFT) return;
-
         const scale: f32 = @floatFromInt(self.dpi_scale);
         const x = ev.x * scale;
         const y = ev.y * scale;
+
+        // A menu already open takes the next click, whichever button it is.
+        if (self.menu) |m| {
+            const box = self.menuBox(m);
+            if (box.hit(x, y)) |i| self.runMenuItem(@enumFromInt(i));
+            self.menu = null;
+            self.ui_dirty = true;
+            return;
+        }
+
+        if (ev.button == sdl.BUTTON_RIGHT) {
+            // The right button opens the menu over the terminal only; the tab
+            // bar and the title belong to the window.
+            if (y < self.chromeH()) return;
+            self.menu = .{ .x = x, .y = y };
+            self.ui_dirty = true;
+            return;
+        }
+        if (ev.button != sdl.BUTTON_LEFT) return;
 
         if (self.picker) |p| {
             const layout = self.renderer.picker(
@@ -447,8 +491,57 @@ pub const App = struct {
         }
     }
 
+    /// The geometry of the open menu.
+    fn menuBox(self: *const App, m: MenuState) rnd.Menu {
+        return self.renderer.menuAt(
+            menu_labels.len,
+            menu_cells,
+            m.x,
+            m.y,
+            @floatFromInt(self.win_w),
+            @floatFromInt(self.win_h),
+        );
+    }
+
+    /// Whether each menu item can be chosen right now.
+    fn menuEnabled(self: *App) [menu_labels.len]bool {
+        const has_selection = if (self.selection) |sel| !sel.isEmpty() else false;
+        const tab = self.tabs.active();
+        const many_panes = if (tab) |t| t.paneCount() > 1 else false;
+        return .{
+            has_selection,
+            true,
+            tab != null,
+            tab != null,
+            many_panes or tab != null,
+        };
+    }
+
+    fn runMenuItem(self: *App, item: MenuItem) void {
+        const on = self.menuEnabled();
+        if (!on[@intFromEnum(item)]) return;
+        switch (item) {
+            .copy => self.copy(),
+            .paste => self.paste(),
+            .split_right => self.splitPane(.horizontal),
+            .split_down => self.splitPane(.vertical),
+            .close_pane => {
+                self.tabs.closeActivePane() catch {};
+                self.clearSelection();
+                if (self.tabs.count == 0) self.running = false;
+            },
+        }
+    }
+
     /// Extends the selection while a drag is in progress.
     fn onMouseMotion(self: *App, ev: sdl.MouseMotionEvent) void {
+        if (self.menu) |*m| {
+            const scale: f32 = @floatFromInt(self.dpi_scale);
+            const was = m.hovered;
+            m.hovered = self.menuBox(m.*).hit(ev.x * scale, ev.y * scale);
+            if (was != m.hovered) self.ui_dirty = true;
+            return;
+        }
         if (!self.dragging) return;
         const tab = self.tabs.active() orelse return;
         const scale: f32 = @floatFromInt(self.dpi_scale);
@@ -721,6 +814,10 @@ pub const App = struct {
 
         if (self.picker) |p| {
             self.renderer.drawHostPicker(self.pickerRows(), p.selected, th_, width, height);
+        }
+        if (self.menu) |m| {
+            const on = self.menuEnabled();
+            self.renderer.drawMenu(self.menuBox(m), &menu_labels, &on, m.hovered, th_);
         }
         if (self.toast) |t| {
             self.renderer.drawToast(t.buf[0..t.len], th_, width, height);

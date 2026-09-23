@@ -58,7 +58,7 @@ inside `ztabb.app`. `NOTICE` spells out how each clause is met.
 ```sh
 zig build                       # build
 zig build run                   # build and run
-zig build test                  # 341 unit tests
+zig build test                  # 347 unit tests
 zig build -Doptimize=ReleaseFast
 
 zig build bundle                # zig-out/ztabb.app, with its icon (macOS)
@@ -105,6 +105,10 @@ they always do.
 
 No binding uses Shift as an extra modifier: under the Ctrl+Shift form it is
 already spoken for, and such a combination would be unreachable there.
+
+**Right-click** over the terminal opens a menu: copy, paste, split the pane
+right or down, close it. Items that would do nothing — copy with no selection —
+are dimmed rather than hidden, so the menu keeps its shape.
 
 Clicking a pane focuses it. Mouse: **+** opens a tab, the globe beside it drops down the SSH hosts, a click
 selects a tab, **×** closes one. Dragging over the terminal selects a range;
