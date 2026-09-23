@@ -419,10 +419,8 @@ pub const App = struct {
             }
         }
 
-        tab.active().terminal.scrollToBottom();
-        self.clearSelection();
-
-        // Shift+PageUp/PageDown scroll the history rather than reaching the shell.
+        // Shift+PageUp/PageDown scroll the history rather than reaching the
+        // shell, so they are answered before the jump back to the prompt below.
         if (mods & sdl.KMOD_SHIFT != 0) {
             const page: i32 = @intCast(self.rows);
             switch (key) {
@@ -441,6 +439,14 @@ pub const App = struct {
         var buf: [16]u8 = undefined;
         const bytes = encodeKey(key, mods, &buf) orelse return;
         if (bytes.len == 0) return;
+
+        // Only now is the press certainly the shell's, and only now do the
+        // view and the selection follow it. Doing this any earlier caught the
+        // bare modifier press that begins every shortcut: holding Command
+        // wiped the selection a fraction of a second before Cmd+C asked for
+        // it, so copy could only ever report that nothing was selected.
+        tab.active().terminal.scrollToBottom();
+        self.clearSelection();
         // A key that produced its own bytes must not also arrive as text.
         self.text_gate.claim();
         tab.active().pty.write(bytes) catch {};
@@ -504,7 +510,10 @@ pub const App = struct {
         if (self.picker != null) return;
         const text = ev.text orelse return;
         const tab = self.tabs.active() orelse return;
+        // Ordinary characters arrive here rather than as key presses, so this
+        // is where typing invalidates what was highlighted.
         tab.active().terminal.scrollToBottom();
+        self.clearSelection();
         tab.active().pty.write(std.mem.span(text)) catch {};
     }
 
@@ -1251,6 +1260,46 @@ test "a nonsense density still yields a usable glyph set" {
     try testing.expectEqual(@as(u32, 1), App.atlasScaleFor(std.math.nan(f32)));
     try testing.expectEqual(@as(u32, 8), App.atlasScaleFor(std.math.inf(f32)));
     try testing.expectEqual(@as(u32, 8), App.atlasScaleFor(64));
+}
+
+test "a modifier held on its own sends nothing and claims nothing" {
+    // The press that begins every shortcut. It used to fall through to the end
+    // of `onKeyDown`, where the view jumped back to the prompt and the
+    // selection was dropped -- so Cmd+C, a fraction of a second later, found
+    // nothing to copy. Producing no bytes is what now keeps that press from
+    // touching either.
+    var buf: [16]u8 = undefined;
+    const bare = [_]struct { key: u32, mods: u16 }{
+        .{ .key = sdl.SDLK_LGUI, .mods = sdl.KMOD_LGUI },
+        .{ .key = sdl.SDLK_RGUI, .mods = sdl.KMOD_RGUI },
+        .{ .key = sdl.SDLK_LCTRL, .mods = sdl.KMOD_LCTRL },
+        .{ .key = sdl.SDLK_RCTRL, .mods = sdl.KMOD_RCTRL },
+        .{ .key = sdl.SDLK_LSHIFT, .mods = sdl.KMOD_LSHIFT },
+        .{ .key = sdl.SDLK_RSHIFT, .mods = sdl.KMOD_RSHIFT },
+        .{ .key = sdl.SDLK_LALT, .mods = sdl.KMOD_LALT },
+        .{ .key = sdl.SDLK_RALT, .mods = sdl.KMOD_RALT },
+        // And the same keys as the second half of a combination.
+        .{ .key = sdl.SDLK_LSHIFT, .mods = sdl.KMOD_LCTRL | sdl.KMOD_LSHIFT },
+        .{ .key = sdl.SDLK_LCTRL, .mods = sdl.KMOD_LCTRL | sdl.KMOD_LSHIFT },
+    };
+    for (bare) |b| {
+        try testing.expect(encodeKey(b.key, b.mods, &buf) == null);
+        // Nor is a modifier ever mistaken for a command of ztabb's own.
+        try testing.expect(shortcutFor(b.key, b.mods) == null);
+    }
+}
+
+test "the copy and paste shortcuts are reachable in both spellings" {
+    // Command on macOS, Ctrl+Shift everywhere else -- and on macOS too, since
+    // the platform claims some Command combinations for itself.
+    for ([_]u16{ sdl.KMOD_LGUI, sdl.KMOD_RGUI, sdl.KMOD_LCTRL | sdl.KMOD_LSHIFT }) |mods| {
+        try testing.expectEqual(Action.copy_line, shortcutFor(sdl.SDLK_C, mods).?);
+        try testing.expectEqual(Action.paste, shortcutFor(sdl.SDLK_V, mods).?);
+    }
+    // Plain Ctrl+C stays the interrupt; the shell needs it.
+    try testing.expect(shortcutFor(sdl.SDLK_C, sdl.KMOD_LCTRL) == null);
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualSlices(u8, "\x03", encodeKey(sdl.SDLK_C, sdl.KMOD_LCTRL, &buf).?);
 }
 
 test "no plain letter or digit is stolen from the shell" {

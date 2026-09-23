@@ -61,6 +61,17 @@ pub const SDLK_LEFT: u32 = 0x40000050;
 pub const SDLK_DOWN: u32 = 0x40000051;
 pub const SDLK_UP: u32 = 0x40000052;
 
+/// The modifier keys themselves. They arrive as ordinary key presses, ahead of
+/// whatever they are held for, and must be recognised as producing nothing.
+pub const SDLK_LCTRL: u32 = 0x400000e0;
+pub const SDLK_LSHIFT: u32 = 0x400000e1;
+pub const SDLK_LALT: u32 = 0x400000e2;
+pub const SDLK_LGUI: u32 = 0x400000e3;
+pub const SDLK_RCTRL: u32 = 0x400000e4;
+pub const SDLK_RSHIFT: u32 = 0x400000e5;
+pub const SDLK_RALT: u32 = 0x400000e6;
+pub const SDLK_RGUI: u32 = 0x400000e7;
+
 pub const SDLK_0: u32 = 0x30;
 pub const SDLK_1: u32 = 0x31;
 pub const SDLK_2: u32 = 0x32;
