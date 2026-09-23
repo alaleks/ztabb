@@ -199,8 +199,14 @@ insert and delete of lines and characters, scrolling regions (DECSTBM), the
 alternate screen (`vim`, `less`, `htop`), DECTCEM, DECSC/DECRC, window title via
 OSC 0/1/2, SGR attributes, 256 colours and truecolor.
 
-Scrollback survives a resize: rows are re-laid at the new width, clipped or
-padded. Lines are not re-wrapped, as in most terminals.
+**Resizing re-wraps.** A line that only broke because the window was narrow is
+one logical line, and changing the width — by dragging the window or by
+stepping the font size — lays it out again at the new one instead of leaving
+old output boxed into the column count it happened to be printed at. History
+is re-wrapped with the screen, the cursor is followed to where its text moved
+to, and a taller window pulls rows back out of the scrollback rather than
+padding the bottom with blanks. The alternate screen is exempt: `vim` and
+`htop` redraw on their own when they hear the new size.
 
 ## The typeface
 
@@ -366,4 +372,6 @@ binary, and the window icon is set at runtime on every platform.
 - [x] Memory ceiling on a tab's history
 - [x] Mouse selection and copying a range
 - [x] Bracketed paste
+- [x] Splitting a tab into panes
+- [x] Re-wrapping the scrollback when the width changes
 - [ ] Custom themes and key bindings from a config file

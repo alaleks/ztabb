@@ -91,6 +91,10 @@ pub const Terminal = struct {
     cols: u32,
     rows: u32,
     cells: []Cell,
+    /// One flag per screen row: the row ran to the right margin and continues
+    /// on the next one. Re-wrapping on resize needs it to tell a wrapped
+    /// continuation from a line of its own.
+    wrapped: []bool,
 
     cursor_row: u32 = 0,
     cursor_col: u32 = 0,
@@ -111,11 +115,15 @@ pub const Terminal = struct {
 
     /// Alternate screen buffer (DECSET 1049), used by full-screen programs.
     alt: ?[]Cell = null,
+    /// The primary screen's wrap flags while the alternate screen is up.
+    alt_wrapped: []bool = &.{},
     alt_saved: SavedCursor = .{},
 
     /// Ring of scrolled-off rows. `sb_rows` are allocated and grow on demand up
     /// to `sb_cap`, so a tab that never scrolls pays nothing for its history.
     sb: []Cell = &.{},
+    /// Wrap flags for the history ring, indexed by the same slots as `sb`.
+    sb_wrapped: []bool = &.{},
     sb_cap: u32,
     sb_rows: u32 = 0,
     sb_head: u32 = 0,
@@ -172,11 +180,16 @@ pub const Terminal = struct {
         errdefer gpa.free(cells);
         @memset(cells, Cell.blank);
 
+        const wrapped = try gpa.alloc(bool, r);
+        errdefer gpa.free(wrapped);
+        @memset(wrapped, false);
+
         return .{
             .gpa = gpa,
             .cols = c,
             .rows = r,
             .cells = cells,
+            .wrapped = wrapped,
             .scroll_bot = r - 1,
             .sb_cap = scrollback_rows,
         };
@@ -184,7 +197,10 @@ pub const Terminal = struct {
 
     pub fn deinit(self: *Terminal) void {
         if (self.alt) |a| self.gpa.free(a);
+        self.gpa.free(self.alt_wrapped);
+        self.gpa.free(self.sb_wrapped);
         self.gpa.free(self.sb);
+        self.gpa.free(self.wrapped);
         self.gpa.free(self.cells);
         self.* = undefined;
     }
@@ -200,19 +216,41 @@ pub const Terminal = struct {
         return self.cells[self.idx(row, col)];
     }
 
-    /// Resizes the grid, keeping the top-left content. Scrollback is dropped
-    /// when the width changes because stored rows are width-indexed.
+    /// Resizes the grid.
+    ///
+    /// On the primary screen the content is re-wrapped: logical lines are
+    /// rebuilt from the wrap flags and laid out again at the new width, so
+    /// text does not stay boxed into the column count it was printed at. The
+    /// alternate screen is only clipped -- the program that owns it redraws
+    /// when it hears about the new size.
     pub fn resize(self: *Terminal, cols: u32, rows: u32) !void {
         const c = @max(cols, 1);
         const r = @max(rows, 1);
         if (c == self.cols and r == self.rows) return;
 
+        if (self.alt == null) try self.reflow(c, r) else try self.clipResize(c, r);
+
+        self.scroll_top = 0;
+        self.scroll_bot = r - 1;
+        self.wrap_pending = false;
+        self.dirty = true;
+
+        // Wider rows cost more, so a history that fitted before may not now.
+        self.compactHistory();
+    }
+
+    /// Resize without re-wrapping: rows keep their columns, clipped or padded.
+    fn clipResize(self: *Terminal, c: u32, r: u32) !void {
         // Every buffer is allocated before any of them is installed, so a
         // failure part-way through leaves the terminal exactly as it was
         // rather than with buffers of mismatched sizes.
         const new_cells = try self.gpa.alloc(Cell, c * r);
         errdefer self.gpa.free(new_cells);
         @memset(new_cells, Cell.blank);
+
+        const new_wrapped = try self.gpa.alloc(bool, r);
+        errdefer self.gpa.free(new_wrapped);
+        @memset(new_wrapped, false);
 
         const new_alt: ?[]Cell = if (self.alt != null) blk: {
             const a = try self.gpa.alloc(Cell, c * r);
@@ -221,10 +259,17 @@ pub const Terminal = struct {
         } else null;
         errdefer if (new_alt) |a| self.gpa.free(a);
 
+        const new_alt_wrapped: []bool = if (self.alt != null)
+            try self.gpa.alloc(bool, r)
+        else
+            &.{};
+        errdefer self.gpa.free(new_alt_wrapped);
+        @memset(new_alt_wrapped, false);
+
         // Stored rows are width-indexed. Rather than throwing the history
         // away on every resize -- which loses the scrollback the moment the
         // window is dragged -- re-lay it at the new width, clipping or padding
-        // each row. Lines are not re-wrapped, which is what most terminals do.
+        // each row. Slots keep their positions, so the ring stays valid.
         const rewidth = c != self.cols and self.sb_rows > 0;
         const new_sb: ?[]Cell = if (rewidth) blk: {
             const sb = try self.gpa.alloc(Cell, @as(usize, self.sb_rows) * c);
@@ -244,11 +289,16 @@ pub const Terminal = struct {
         for (0..copy_rows) |row| {
             const src = self.cells[self.idx(@intCast(row), 0)..][0..copy_cols];
             @memcpy(new_cells[row * c ..][0..copy_cols], src);
+            new_wrapped[row] = self.wrapped[row];
         }
 
         if (new_alt) |a| {
             self.gpa.free(self.alt.?);
             self.alt = a;
+            const keep = @min(self.alt_wrapped.len, new_alt_wrapped.len);
+            @memcpy(new_alt_wrapped[0..keep], self.alt_wrapped[0..keep]);
+            self.gpa.free(self.alt_wrapped);
+            self.alt_wrapped = new_alt_wrapped;
         }
         if (new_sb) |sb| {
             self.gpa.free(self.sb);
@@ -256,18 +306,180 @@ pub const Terminal = struct {
         }
 
         self.gpa.free(self.cells);
+        self.gpa.free(self.wrapped);
         self.cells = new_cells;
+        self.wrapped = new_wrapped;
         self.cols = c;
         self.rows = r;
         self.cursor_row = @min(self.cursor_row, r - 1);
         self.cursor_col = @min(self.cursor_col, c - 1);
-        self.scroll_top = 0;
-        self.scroll_bot = r - 1;
-        self.wrap_pending = false;
-        self.dirty = true;
+    }
 
-        // Wider rows cost more, so a history that fitted before may not now.
-        self.compactHistory();
+    // -- reflow ------------------------------------------------------------
+
+    /// A cell carrying nothing: reflow trims these off the end of a logical
+    /// line so the old width's padding does not become content at the new one.
+    fn isPadding(cell: Cell) bool {
+        return cell.ch == ' ' and
+            Color.eql(cell.bg, .default) and
+            @as(u8, @bitCast(cell.attrs)) == @as(u8, @bitCast(Attrs{}));
+    }
+
+    /// Source row `i` for reflow: history first, oldest at 0, then the screen.
+    fn srcRow(self: *const Terminal, i: u32) []const Cell {
+        if (i < self.sb_len) return self.scrollbackRow(self.sb_len - i).?;
+        return self.cells[self.idx(i - self.sb_len, 0)..][0..self.cols];
+    }
+
+    fn srcWrapped(self: *const Terminal, i: u32) bool {
+        if (i < self.sb_len) {
+            const slot = (self.sb_head + self.sb_rows - (self.sb_len - i)) % self.sb_rows;
+            return self.sb_wrapped[slot];
+        }
+        return self.wrapped[i - self.sb_len];
+    }
+
+    /// The logical line starting at source row `start`: how many rows it
+    /// spans, and how many cells it holds once trailing padding is dropped.
+    const Logical = struct { rows: u32, len: usize };
+
+    fn logicalAt(self: *const Terminal, start: u32, total: u32) Logical {
+        var n: u32 = 1;
+        while (start + n < total and self.srcWrapped(start + n - 1)) n += 1;
+        const last = self.srcRow(start + n - 1);
+        var len: usize = last.len;
+        while (len > 0 and isPadding(last[len - 1])) len -= 1;
+        return .{ .rows = n, .len = @as(usize, n - 1) * self.cols + len };
+    }
+
+    /// Copies `dst.len` cells of the logical line at `start`, beginning at
+    /// cell `from`.
+    fn copyLogical(self: *const Terminal, start: u32, from: usize, dst: []Cell) void {
+        for (dst, 0..) |*out, i| {
+            const at = from + i;
+            out.* = self.srcRow(start + @as(u32, @intCast(at / self.cols)))[at % self.cols];
+        }
+    }
+
+    /// Rows one logical line occupies at width `c`, never fewer than one.
+    fn outRows(line: Logical, c: u32) u32 {
+        return @intCast(@max(1, (line.len + c - 1) / c));
+    }
+
+    /// Rebuilds history and screen at `c` x `r`, re-wrapping logical lines.
+    ///
+    /// Two passes: the first counts the rows the new width produces and finds
+    /// where the cursor lands among them, the second writes only the rows that
+    /// survive into freshly sized buffers. Counting first means no temporary
+    /// copy of the whole history.
+    fn reflow(self: *Terminal, c: u32, r: u32) !void {
+        const total_src = self.sb_len + self.rows;
+        const cursor_abs = self.sb_len + self.cursor_row;
+
+        var total_out: u32 = 0;
+        var cur_out_row: u32 = 0;
+        var cur_out_col: u32 = 0;
+        {
+            var at: u32 = 0;
+            while (at < total_src) {
+                const line = self.logicalAt(at, total_src);
+                var out = outRows(line, c);
+                if (cursor_abs >= at and cursor_abs < at + line.rows) {
+                    const off = @as(usize, cursor_abs - at) * self.cols + self.cursor_col;
+                    const within: u32 = @intCast(off / c);
+                    cur_out_row = total_out + within;
+                    cur_out_col = @intCast(off % c);
+                    // The cursor may sit past the end of what the line holds;
+                    // its row still has to exist.
+                    out = @max(out, within + 1);
+                }
+                total_out += out;
+                at += line.rows;
+            }
+        }
+
+        // The screen shows the last `r` rows, pulled up if that would leave
+        // the cursor above them.
+        var screen_start: u32 = if (total_out > r) total_out - r else 0;
+        screen_start = @min(screen_start, cur_out_row);
+        const hist_keep = @min(screen_start, self.maxHistoryRowsFor(c));
+        const drop_before = screen_start - hist_keep;
+        // Re-wrapping at a wider size can push the history past its budget;
+        // dropping the oldest rows here is the same event `compactHistory`
+        // reports, so it is counted the same way.
+        if (hist_keep < screen_start) self.compactions += 1;
+
+        const new_cells = try self.gpa.alloc(Cell, @as(usize, c) * r);
+        errdefer self.gpa.free(new_cells);
+        @memset(new_cells, Cell.blank);
+
+        const new_wrapped = try self.gpa.alloc(bool, r);
+        errdefer self.gpa.free(new_wrapped);
+        @memset(new_wrapped, false);
+
+        const new_sb: []Cell = if (hist_keep > 0)
+            try self.gpa.alloc(Cell, @as(usize, hist_keep) * c)
+        else
+            &.{};
+        errdefer self.gpa.free(new_sb);
+        @memset(new_sb, Cell.blank);
+
+        const new_sb_wrapped: []bool = if (hist_keep > 0)
+            try self.gpa.alloc(bool, hist_keep)
+        else
+            &.{};
+        errdefer self.gpa.free(new_sb_wrapped);
+        @memset(new_sb_wrapped, false);
+
+        const screen_end = screen_start + r;
+        var out_at: u32 = 0;
+        var at: u32 = 0;
+        while (at < total_src and out_at < screen_end) {
+            const line = self.logicalAt(at, total_src);
+            var out = outRows(line, c);
+            if (cursor_abs >= at and cursor_abs < at + line.rows) {
+                const off = @as(usize, cursor_abs - at) * self.cols + self.cursor_col;
+                out = @max(out, @as(u32, @intCast(off / c)) + 1);
+            }
+            var k: u32 = 0;
+            while (k < out) : (k += 1) {
+                const slot = out_at + k;
+                if (slot < drop_before) continue;
+                if (slot >= screen_end) break;
+                const to_history = slot < screen_start;
+                const dst = if (to_history)
+                    new_sb[@as(usize, slot - drop_before) * c ..][0..c]
+                else
+                    new_cells[@as(usize, slot - screen_start) * c ..][0..c];
+                const from = @as(usize, k) * c;
+                const take = if (from < line.len) @min(@as(usize, c), line.len - from) else 0;
+                self.copyLogical(at, from, dst[0..take]);
+                @memset(dst[take..], Cell.blank);
+                if (to_history)
+                    new_sb_wrapped[slot - drop_before] = k + 1 < out
+                else
+                    new_wrapped[slot - screen_start] = k + 1 < out;
+            }
+            out_at += out;
+            at += line.rows;
+        }
+
+        self.gpa.free(self.cells);
+        self.gpa.free(self.wrapped);
+        self.gpa.free(self.sb);
+        self.gpa.free(self.sb_wrapped);
+        self.cells = new_cells;
+        self.wrapped = new_wrapped;
+        self.sb = new_sb;
+        self.sb_wrapped = new_sb_wrapped;
+        self.cols = c;
+        self.rows = r;
+        self.sb_rows = hist_keep;
+        self.sb_len = hist_keep;
+        self.sb_head = 0;
+        self.view_offset = 0;
+        self.cursor_row = @min(cur_out_row -| screen_start, r - 1);
+        self.cursor_col = @min(cur_out_col, c - 1);
     }
 
     // -- scrollback --------------------------------------------------------
@@ -282,16 +494,24 @@ pub const Terminal = struct {
         if (want <= self.sb_rows) return;
 
         const new = self.gpa.alloc(Cell, @as(usize, want) * self.cols) catch return;
+        const new_wrapped = self.gpa.alloc(bool, want) catch {
+            self.gpa.free(new);
+            return;
+        };
         @memset(new, Cell.blank);
+        @memset(new_wrapped, false);
         for (0..self.sb_len) |i| {
             const slot = (self.sb_head + self.sb_rows - self.sb_len + i) % self.sb_rows;
             @memcpy(
                 new[i * self.cols ..][0..self.cols],
                 self.sb[@as(usize, slot) * self.cols ..][0..self.cols],
             );
+            new_wrapped[i] = self.sb_wrapped[slot];
         }
         self.gpa.free(self.sb);
+        self.gpa.free(self.sb_wrapped);
         self.sb = new;
+        self.sb_wrapped = new_wrapped;
         self.sb_rows = want;
         self.sb_head = self.sb_len;
     }
@@ -304,7 +524,12 @@ pub const Terminal = struct {
     /// Rows the history may hold: whichever of the row cap and the memory
     /// budget binds first.
     pub fn maxHistoryRows(self: *const Terminal) u32 {
-        const row_bytes = @as(usize, self.cols) * @sizeOf(Cell);
+        return self.maxHistoryRowsFor(self.cols);
+    }
+
+    /// The same, for a width the terminal has not taken on yet.
+    fn maxHistoryRowsFor(self: *const Terminal, cols: u32) u32 {
+        const row_bytes = @as(usize, cols) * @sizeOf(Cell);
         const by_budget = self.memory_budget / @max(row_bytes, 1);
         const capped = @min(by_budget, self.sb_cap);
         return @intCast(@max(capped, @min(MIN_HISTORY_ROWS, self.sb_cap)));
@@ -322,7 +547,12 @@ pub const Terminal = struct {
 
         const keep_rows = @max(target, 1);
         const new = self.gpa.alloc(Cell, @as(usize, keep_rows) * self.cols) catch return;
+        const new_wrapped = self.gpa.alloc(bool, keep_rows) catch {
+            self.gpa.free(new);
+            return;
+        };
         @memset(new, Cell.blank);
+        @memset(new_wrapped, false);
 
         // Copy the newest `keep` rows, oldest first, so the ring stays ordered.
         const keep = @min(self.sb_len, keep_rows);
@@ -333,10 +563,13 @@ pub const Terminal = struct {
                 new[i * self.cols ..][0..self.cols],
                 self.sb[@as(usize, slot) * self.cols ..][0..self.cols],
             );
+            new_wrapped[i] = self.sb_wrapped[slot];
         }
 
         self.gpa.free(self.sb);
+        self.gpa.free(self.sb_wrapped);
         self.sb = new;
+        self.sb_wrapped = new_wrapped;
         self.sb_rows = keep_rows;
         self.sb_len = keep;
         self.sb_head = keep % keep_rows;
@@ -354,6 +587,7 @@ pub const Terminal = struct {
         if (self.sb_rows == 0) return; // growth failed; drop the row
         const dst = @as(usize, self.sb_head) * self.cols;
         @memcpy(self.sb[dst..][0..self.cols], self.cells[self.idx(row, 0)..][0..self.cols]);
+        self.sb_wrapped[self.sb_head] = self.wrapped[row];
         self.sb_head = (self.sb_head + 1) % self.sb_rows;
         if (self.sb_len < self.sb_rows) self.sb_len += 1;
         // Keep the viewport anchored to the same text while it is scrolled back.
@@ -426,9 +660,11 @@ pub const Terminal = struct {
             const dst = self.idx(r, 0);
             const src = self.idx(r + 1, 0);
             @memcpy(self.cells[dst..][0..self.cols], self.cells[src..][0..self.cols]);
+            self.wrapped[r] = self.wrapped[r + 1];
         }
         const last = self.idx(self.scroll_bot, 0);
         self.eraseRange(last, last + self.cols);
+        self.wrapped[self.scroll_bot] = false;
         self.dirty = true;
     }
 
@@ -438,10 +674,20 @@ pub const Terminal = struct {
             const dst = self.idx(r, 0);
             const src = self.idx(r - 1, 0);
             @memcpy(self.cells[dst..][0..self.cols], self.cells[src..][0..self.cols]);
+            self.wrapped[r] = self.wrapped[r - 1];
         }
         const first = self.idx(self.scroll_top, 0);
         self.eraseRange(first, first + self.cols);
+        self.wrapped[self.scroll_top] = false;
         self.dirty = true;
+    }
+
+    /// LF, IND and NEL: the line ends here, so whatever the row was marked as
+    /// stops being a wrap. `newline` itself cannot clear the flag -- the
+    /// autowrap path sets it and then calls through here.
+    fn lineFeed(self: *Terminal) void {
+        self.wrapped[self.cursor_row] = false;
+        self.newline();
     }
 
     pub fn newline(self: *Terminal) void {
@@ -455,6 +701,9 @@ pub const Terminal = struct {
 
     pub fn putChar(self: *Terminal, ch: u21) void {
         if (self.wrap_pending) {
+            // The row ran out of columns rather than ending: mark it as
+            // continuing before `newline` possibly retires it to history.
+            self.wrapped[self.cursor_row] = true;
             self.cursor_col = 0;
             self.newline();
         }
@@ -486,9 +735,15 @@ pub const Terminal = struct {
     pub fn eraseInDisplay(self: *Terminal, mode: u32) void {
         const cur = self.idx(self.cursor_row, self.cursor_col);
         switch (mode) {
-            0 => self.eraseRange(cur, self.cells.len),
+            0 => {
+                self.eraseRange(cur, self.cells.len);
+                @memset(self.wrapped[self.cursor_row..], false);
+            },
             1 => self.eraseRange(0, cur + 1),
-            2, 3 => self.eraseRange(0, self.cells.len),
+            2, 3 => {
+                self.eraseRange(0, self.cells.len);
+                @memset(self.wrapped, false);
+            },
             else => {},
         }
         self.dirty = true;
@@ -499,9 +754,15 @@ pub const Terminal = struct {
         const row_end = row_start + self.cols;
         const cur = row_start + self.cursor_col;
         switch (mode) {
-            0 => self.eraseRange(cur, row_end),
+            0 => {
+                self.eraseRange(cur, row_end);
+                self.wrapped[self.cursor_row] = false;
+            },
             1 => self.eraseRange(row_start, cur + 1),
-            2 => self.eraseRange(row_start, row_end),
+            2 => {
+                self.eraseRange(row_start, row_end);
+                self.wrapped[self.cursor_row] = false;
+            },
             else => {},
         }
         self.dirty = true;
@@ -576,12 +837,17 @@ pub const Terminal = struct {
         self.scroll_bot = self.rows - 1;
         self.saved = .{};
         self.eraseRange(0, self.cells.len);
+        @memset(self.wrapped, false);
         self.dirty = true;
     }
 
     fn enterAltScreen(self: *Terminal) void {
         if (self.alt != null) return;
         const alt = self.gpa.alloc(Cell, self.cells.len) catch return;
+        const alt_wrapped = self.gpa.alloc(bool, self.rows) catch {
+            self.gpa.free(alt);
+            return;
+        };
         @memset(alt, Cell.blank);
         self.alt_saved = .{
             .row = self.cursor_row,
@@ -592,8 +858,12 @@ pub const Terminal = struct {
         };
         // `alt` holds the buffer being swapped out; `cells` stays the live one.
         @memcpy(alt, self.cells);
+        @memcpy(alt_wrapped, self.wrapped);
         self.alt = alt;
+        self.gpa.free(self.alt_wrapped);
+        self.alt_wrapped = alt_wrapped;
         self.eraseRange(0, self.cells.len);
+        @memset(self.wrapped, false);
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.view_offset = 0;
@@ -603,7 +873,10 @@ pub const Terminal = struct {
     fn leaveAltScreen(self: *Terminal) void {
         const alt = self.alt orelse return;
         @memcpy(self.cells, alt);
+        @memcpy(self.wrapped, self.alt_wrapped[0..@min(self.alt_wrapped.len, self.wrapped.len)]);
         self.gpa.free(alt);
+        self.gpa.free(self.alt_wrapped);
+        self.alt_wrapped = &.{};
         self.alt = null;
         self.cursor_row = @min(self.alt_saved.row, self.rows - 1);
         self.cursor_col = @min(self.alt_saved.col, self.cols - 1);
@@ -714,7 +987,7 @@ pub const Terminal = struct {
             0x07 => self.bell = true,
             0x08 => self.backspace(),
             0x09 => self.tab(),
-            0x0A, 0x0B, 0x0C => self.newline(),
+            0x0A, 0x0B, 0x0C => self.lineFeed(),
             0x0D => {
                 self.cursor_col = 0;
                 self.wrap_pending = false;
@@ -770,12 +1043,12 @@ pub const Terminal = struct {
                 self.state = .ground;
             },
             'D' => {
-                self.newline();
+                self.lineFeed();
                 self.state = .ground;
             },
             'E' => {
                 self.cursor_col = 0;
-                self.newline();
+                self.lineFeed();
                 self.state = .ground;
             },
             'M' => {
@@ -1197,6 +1470,13 @@ fn rowText(t: *const Terminal, row: u32, buf: []u8) []const u8 {
     return std.mem.trimEnd(u8, buf[0..n], " ");
 }
 
+/// The text of an arbitrary row slice, trailing blanks trimmed.
+fn sliceText(row: []const Cell, buf: []u8) []const u8 {
+    var n: usize = 0;
+    for (row) |cell| n += std.unicode.utf8Encode(cell.ch, buf[n..]) catch 0;
+    return std.mem.trimEnd(u8, buf[0..n], " ");
+}
+
 test "a Cell stays small enough for a long history" {
     // The scrollback multiplies this by every stored row, so a regression here
     // costs megabytes per tab.
@@ -1348,11 +1628,11 @@ test "history still grows on demand after a resize" {
     var t = try testTerm(5, 2);
     defer t.deinit();
     t.write("aaa\r\nbbb\r\nccc");
-    const rows = t.sb_rows;
     try t.resize(9, 2);
-    try testing.expectEqual(rows, t.sb_rows);
-
+    // Re-wrapping sizes the ring to what it actually holds; it has to be able
+    // to grow again from there.
     const before = t.sb_len;
+    try testing.expectEqual(t.sb_rows, before);
     t.write("\r\nddd\r\neee");
     // The history kept what it had and went on taking more: the newest row is
     // from after the resize, the oldest from before it.
@@ -2111,7 +2391,7 @@ test "BEL raises the bell flag without printing" {
     try testing.expectEqual(@as(u32, 0), t.cursor_col);
 }
 
-test "resize keeps the top-left content and clamps the cursor" {
+test "a shorter window pushes the top into history and keeps the cursor" {
     var t = try testTerm(20, 10);
     defer t.deinit();
     t.write("abc");
@@ -2121,11 +2401,14 @@ test "resize keeps the top-left content and clamps the cursor" {
     try testing.expectEqual(@as(u32, 10), t.cols);
     try testing.expectEqual(@as(u32, 5), t.rows);
     try testing.expectEqual(@as(usize, 50), t.cells.len);
+    try testing.expectEqual(@as(u32, 4), t.scroll_bot);
+    // The cursor sat two rows into a line that is now twice as tall, and the
+    // screen stays anchored to it.
     try testing.expectEqual(@as(u32, 4), t.cursor_row);
     try testing.expectEqual(@as(u32, 9), t.cursor_col);
+    // The text scrolled off the top rather than being dropped.
     var buf: [64]u8 = undefined;
-    try testing.expectEqualStrings("abc", rowText(&t, 0, &buf));
-    try testing.expectEqual(@as(u32, 4), t.scroll_bot);
+    try testing.expectEqualStrings("abc", sliceText(t.scrollbackRow(6).?, &buf));
 }
 
 test "resize to zero is clamped rather than underflowing" {
@@ -2166,25 +2449,145 @@ test "a width change keeps the scrollback, re-laid at the new width" {
     try testing.expectEqual(@as(u21, ' '), row[8].ch); // padded, not garbage
 }
 
-test "narrowing clips the stored rows instead of reading past them" {
+test "narrowing re-wraps the stored rows instead of clipping them" {
     var t = try testTerm(10, 2);
     defer t.deinit();
     t.write("abcdefghij\r\nklmnopqrst\r\nz");
     try t.resize(4, 2);
-    // One row scrolled off before the resize; it keeps its first four columns.
-    const row = t.scrollbackRow(1).?;
-    try testing.expectEqual(@as(usize, 4), row.len);
-    try testing.expectEqual(@as(u21, 'a'), row[0].ch);
-    try testing.expectEqual(@as(u21, 'd'), row[3].ch);
+    // Each ten-column line becomes three four-column ones; nothing is lost.
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("abcd", sliceText(t.scrollbackRow(5).?, &buf));
+    try testing.expectEqualStrings("efgh", sliceText(t.scrollbackRow(4).?, &buf));
+    try testing.expectEqualStrings("ij", sliceText(t.scrollbackRow(3).?, &buf));
+    try testing.expectEqualStrings("klmn", sliceText(t.scrollbackRow(2).?, &buf));
+    try testing.expectEqualStrings("opqr", sliceText(t.scrollbackRow(1).?, &buf));
+    try testing.expectEqualStrings("st", sliceText(t.viewRow(0), &buf));
+    try testing.expectEqualStrings("z", sliceText(t.viewRow(1), &buf));
 }
 
-test "a height-only change preserves scrollback" {
+test "widening re-joins a line that only wrapped because it had to" {
+    // The reported bug: zooming in left old output boxed into the column
+    // count it happened to be printed at.
+    var t = try testTerm(10, 4);
+    defer t.deinit();
+    t.write("the quick brown fox");
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("the quick", rowText(&t, 0, &buf)); // trailing blank trimmed
+    try testing.expectEqualStrings("brown fox", rowText(&t, 1, &buf));
+
+    try t.resize(30, 4);
+    try testing.expectEqualStrings("the quick brown fox", rowText(&t, 0, &buf));
+    try testing.expectEqualStrings("", rowText(&t, 1, &buf));
+    try testing.expectEqual(@as(u32, 0), t.cursor_row);
+    try testing.expectEqual(@as(u32, 19), t.cursor_col);
+}
+
+test "a line ended by a line feed is never joined to the next" {
+    var t = try testTerm(10, 4);
+    defer t.deinit();
+    t.write("abcdefghij\r\nklm");
+    // Ten columns exactly, then an explicit newline: two lines, not one wrap.
+    try t.resize(30, 4);
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("abcdefghij", rowText(&t, 0, &buf));
+    try testing.expectEqualStrings("klm", rowText(&t, 1, &buf));
+}
+
+test "a wrapped line comes back unchanged from a narrow round trip" {
+    var t = try testTerm(20, 6);
+    defer t.deinit();
+    const line = "0123456789abcdefghijklmnopqrstuvwxyz";
+    t.write(line);
+    try t.resize(7, 6);
+    try t.resize(20, 6);
+
+    var buf: [128]u8 = undefined;
+    var n: usize = 0;
+    for (0..3) |row| {
+        var row_buf: [64]u8 = undefined;
+        const text = rowText(&t, @intCast(row), &row_buf);
+        @memcpy(buf[n..][0..text.len], text);
+        n += text.len;
+    }
+    try testing.expectEqualStrings(line, buf[0..n]);
+}
+
+test "re-wrapping carries colours and attributes with the text" {
+    var t = try testTerm(6, 3);
+    defer t.deinit();
+    t.write("\x1b[31mredredred");
+    try t.resize(20, 3);
+    for (0..9) |c| {
+        try testing.expect(Color.eql(.{ .indexed = 1 }, t.cellAt(0, @intCast(c)).fg));
+    }
+}
+
+test "the alternate screen is clipped rather than re-wrapped" {
+    // Programs that own the alternate screen redraw on SIGWINCH; re-wrapping
+    // what they drew would only garble a frame they are about to replace.
+    var t = try testTerm(10, 3);
+    defer t.deinit();
+    t.write("\x1b[?1049habcdefghij");
+    try t.resize(20, 3);
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("abcdefghij", rowText(&t, 0, &buf));
+    try testing.expectEqualStrings("", rowText(&t, 1, &buf));
+}
+
+test "the primary screen keeps its wrap flags across the alternate screen" {
+    var t = try testTerm(10, 3);
+    defer t.deinit();
+    t.write("the quick brown fox");
+    t.write("\x1b[?1049h");
+    t.write("\x1b[?1049l");
+    try t.resize(30, 3);
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("the quick brown fox", rowText(&t, 0, &buf));
+}
+
+test "fuzzing writes against resizes never panics or loses the cursor" {
+    var t = try Terminal.init(testing.allocator, 20, 6, 200);
+    defer t.deinit();
+    var prng = std.Random.DefaultPrng.init(0x5E51E);
+    const rand = prng.random();
+    var buf: [64]u8 = undefined;
+
+    for (0..300) |_| {
+        const n = rand.intRangeAtMost(usize, 0, buf.len);
+        for (buf[0..n]) |*b| b.* = switch (rand.intRangeAtMost(u8, 0, 3)) {
+            0 => '\n',
+            1 => '\r',
+            else => rand.intRangeAtMost(u8, 'a', 'z'),
+        };
+        t.write(buf[0..n]);
+        try t.resize(
+            rand.intRangeAtMost(u32, 1, 40),
+            rand.intRangeAtMost(u32, 1, 12),
+        );
+        try testing.expect(t.cursor_row < t.rows);
+        try testing.expect(t.cursor_col < t.cols);
+        try testing.expectEqual(@as(usize, t.cols) * t.rows, t.cells.len);
+        try testing.expectEqual(@as(usize, t.rows), t.wrapped.len);
+        try testing.expect(t.sb_len <= t.sb_rows);
+        try testing.expectEqual(@as(usize, t.sb_rows) * t.cols, t.sb.len);
+        try testing.expectEqual(@as(usize, t.sb_rows), t.sb_wrapped.len);
+        try testing.expect(t.historyBytes() <= t.memory_budget + @as(usize, t.cols) * @sizeOf(Cell));
+    }
+}
+
+test "a taller window pulls rows back out of the history" {
     var t = try testTerm(5, 2);
     defer t.deinit();
     t.write("aaa\r\nbbb\r\nccc");
-    const before = t.sb_len;
+    try testing.expect(t.sb_len > 0);
     try t.resize(5, 4);
-    try testing.expectEqual(before, t.sb_len);
+    // Two more rows of room, and the history had one row to give back.
+    try testing.expectEqual(@as(u32, 0), t.sb_len);
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("aaa", rowText(&t, 0, &buf));
+    try testing.expectEqualStrings("bbb", rowText(&t, 1, &buf));
+    try testing.expectEqualStrings("ccc", rowText(&t, 2, &buf));
+    try testing.expectEqual(@as(u32, 2), t.cursor_row);
 }
 
 test "fuzzing the parser with arbitrary bytes never panics" {
