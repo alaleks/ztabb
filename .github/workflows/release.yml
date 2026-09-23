@@ -19,22 +19,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-14 and later are Apple Silicon; macos-13 is the last Intel
-          # image, and each builds for the machine it runs on because SDL3
-          # comes from that machine's Homebrew.
+          # Each job builds for the machine it runs on, because SDL3 comes
+          # from that machine's Homebrew. The plain macOS labels are Apple
+          # Silicon; Intel needs the `-intel` suffix, the images that used to
+          # be `macos-13` having been retired.
           - arch: aarch64-macos
-            os: macos-14
+            os: macos-15
           - arch: x86_64-macos
-            os: macos-13
+            os: macos-15-intel
           - arch: x86_64-linux
             os: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
+
+      - name: Check the toolchain
+        run: zig version
 
       - name: Install SDL3 (macOS)
         if: runner.os == 'macOS'
@@ -73,7 +77,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bundle-${{ matrix.arch }}
           path: dist/*
@@ -84,7 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -94,7 +98,7 @@ jobs:
         run: sha256sum * > checksums.txt
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: dist/*

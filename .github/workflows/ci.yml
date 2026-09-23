@@ -18,8 +18,8 @@ jobs:
     name: macOS
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v1
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
 
@@ -68,8 +68,8 @@ jobs:
     name: Linux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v1
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
 
@@ -94,8 +94,8 @@ jobs:
     name: Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v1
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
 
@@ -119,8 +119,8 @@ jobs:
       matrix:
         target: [aarch64-linux-gnu, x86_64-macos, aarch64-macos, x86_64-windows-gnu]
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v1
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
 
@@ -128,22 +128,25 @@ jobs:
       # against for these targets, so this compiles the core modules only.
       # Written out rather than looped: relying on word splitting to expand a
       # variable of arguments breaks under any shell that does not do it.
+      # The objects go to a real directory rather than /dev/null, which the
+      # debug-info writer cannot seek and panics on.
       - name: Compile core for ${{ matrix.target }}
         run: |
           set -eu
           t=${{ matrix.target }}
+          out=$(mktemp -d)
           for m in font theme ssh icons appicon png pty macos panes; do
-            zig build-obj -target "$t" -lc -Mroot="src/$m.zig" -femit-bin=/dev/null
+            zig build-obj -target "$t" -lc -Mroot="src/$m.zig" -femit-bin="$out/$m.o"
           done
           zig build-obj -target "$t" -lc \
             --dep theme -Mroot=src/terminal.zig -Mtheme=src/theme.zig \
-            -femit-bin=/dev/null
+            -femit-bin="$out/terminal.o"
           zig build-obj -target "$t" -lc \
             --dep theme -Mroot=src/highlight.zig -Mtheme=src/theme.zig \
-            -femit-bin=/dev/null
+            -femit-bin="$out/highlight.o"
           zig build-obj -target "$t" -lc \
             --dep pty --dep term --dep ssh -Mroot=src/tabs.zig \
             -Mpty=src/pty.zig \
             --dep theme -Mterm=src/terminal.zig -Mtheme=src/theme.zig \
             -Mssh=src/ssh.zig \
-            -femit-bin=/dev/null
+            -femit-bin="$out/tabs.o"
