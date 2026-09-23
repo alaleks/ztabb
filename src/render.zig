@@ -873,8 +873,9 @@ pub const Renderer = struct {
         }
 
         const first = p.firstVisible(selected);
-        const name_cols = p.nameCols();
-        const detail_x = x + cw + self.uiCellW() * @as(f32, @floatFromInt(name_cols));
+        const name_cols = p.nameCols() -| 1; // one cell of gutter
+        const detail_cols = p.detailCols();
+        const detail_x = x + cw + self.uiCellW() * @as(f32, @floatFromInt(p.nameCols()));
         var line: usize = 0;
         for (0..p.visibleFrom(first)) |i| {
             const host = hosts[first + i];
@@ -886,17 +887,29 @@ pub const Renderer = struct {
                 self.fill(x + cw / 2, row_y, p.boxW() - cw, row_h, th.selection);
             }
 
-            // The name wraps within its column; the address stays put.
+            // Each column wraps inside itself, so neither can push the other
+            // across or run out through the edge of the box.
             const fg = if (is_sel) th.fg else th.hl_command;
-            var at: usize = 0;
+            var name_at: usize = 0;
+            var detail_at: usize = 0;
             for (0..span) |k| {
-                const end = utf8Advance(host.alias, at, name_cols -| 1);
-                const y_k = row_y + ch * @as(f32, @floatFromInt(k));
-                _ = self.drawUiText(host.alias[at..end], x + cw, self.uiTextY(y_k, ch), fg);
-                at = end;
-            }
-            if (host.detail.len > 0) {
-                _ = self.drawUiText(host.detail, detail_x, self.uiTextY(row_y, ch), th.tab_inactive_fg);
+                const text_y = self.uiTextY(row_y + ch * @as(f32, @floatFromInt(k)), ch);
+                const name_end = utf8Advance(host.alias, name_at, name_cols);
+                if (name_end > name_at) {
+                    _ = self.drawUiText(host.alias[name_at..name_end], x + cw, text_y, fg);
+                }
+                name_at = name_end;
+
+                const detail_end = utf8Advance(host.detail, detail_at, detail_cols);
+                if (detail_end > detail_at) {
+                    _ = self.drawUiText(
+                        host.detail[detail_at..detail_end],
+                        detail_x,
+                        text_y,
+                        th.tab_inactive_fg,
+                    );
+                }
+                detail_at = detail_end;
             }
             line += span;
         }
@@ -1009,20 +1022,40 @@ pub const Picker = struct {
     /// start at the same x on every row, or one long name shunts every
     /// address across and the list stops being readable down its edge.
     pub fn nameCols(self: Picker) usize {
-        if (self.ui_cell_w <= 0) return 4;
-        const interior = (self.boxW() - self.cell_w * 2) / self.ui_cell_w;
-        if (interior < 8) return 4;
-        return @intFromFloat(interior / 2);
+        return @max(self.interiorCols() / 2, 4);
     }
 
-    /// Lines entry `i` takes: its name wrapped inside the name column.
+    /// Width of the address column in interface cells: the rest of the
+    /// interior, so a long address wraps at the box edge instead of running
+    /// out through it.
+    pub fn detailCols(self: Picker) usize {
+        return @max(self.interiorCols() -| self.nameCols(), 4);
+    }
+
+    /// Interface cells between the box's two margins.
+    fn interiorCols(self: Picker) usize {
+        if (self.ui_cell_w <= 0) return 8;
+        const room = (self.boxW() - self.cell_w * 2) / self.ui_cell_w;
+        if (room < 8) return 8;
+        return @intFromFloat(room);
+    }
+
+    /// Lines `chars` code points need in a column `per_line` cells wide.
+    fn wrapLines(chars: usize, per_line: usize) usize {
+        if (per_line == 0 or chars <= per_line) return 1;
+        return (chars + per_line - 1) / per_line;
+    }
+
+    fn codepoints(text: []const u8) usize {
+        return std.unicode.utf8CountCodepoints(text) catch text.len;
+    }
+
+    /// Lines entry `i` takes: whichever of its two columns wraps further.
     pub fn span(self: Picker, i: usize) usize {
         if (i >= self.rows.len) return 1;
-        const alias = self.rows[i].alias;
-        const chars = std.unicode.utf8CountCodepoints(alias) catch alias.len;
-        const per_line = self.nameCols() -| 1;
-        if (per_line == 0 or chars <= per_line) return 1;
-        return @min(MAX_SPAN, (chars + per_line - 1) / per_line);
+        const name = wrapLines(codepoints(self.rows[i].alias), self.nameCols() -| 1);
+        const detail = wrapLines(codepoints(self.rows[i].detail), self.detailCols());
+        return @min(MAX_SPAN, @max(name, detail));
     }
 
     /// Lines the window leaves for the list.
@@ -1649,6 +1682,54 @@ test "a name too long for its column wraps instead of overflowing" {
     // However long the name, an entry is capped so it cannot fill the box.
     try testing.expectEqual(Picker.MAX_SPAN, p.span(2));
     try testing.expectEqual(@as(usize, 1 + 2 + 3), p.listLines());
+}
+
+test "a long address wraps instead of running out of the box" {
+    // Reported: a long IP or host name ran off the right-hand edge of the
+    // picker, because only the name column ever wrapped.
+    var rows = [_]HostRow{
+        .{ .alias = "gw", .detail = "10.0.0.1" },
+        .{ .alias = "gw", .detail = "a-very-long-host-name.internal.example.com:22022" },
+    };
+    const p: Picker = .{
+        .cell_w = 8,
+        .cell_h = 16,
+        .ui_cell_w = 7,
+        .width = 800,
+        .height = 600,
+        .rows = &rows,
+    };
+    try testing.expectEqual(@as(usize, 1), p.span(0));
+    try testing.expect(p.span(1) > 1);
+    try testing.expect(p.span(1) <= Picker.MAX_SPAN);
+}
+
+test "the two columns together never overrun the box" {
+    // Whatever the cell sizes, the address column ends at the margin rather
+    // than past it.
+    for ([_]f32{ 4, 7, 9, 13, 20, 64 }) |ui_cell_w| {
+        for ([_]f32{ 6, 8, 16, 30 }) |cell_w| {
+            var rows = [_]HostRow{.{ .alias = "h", .detail = "d" }};
+            const p: Picker = .{
+                .cell_w = cell_w,
+                .cell_h = 16,
+                .ui_cell_w = ui_cell_w,
+                .width = 800,
+                .height = 600,
+                .rows = &rows,
+            };
+            const right = p.cell_w + p.ui_cell_w *
+                @as(f32, @floatFromInt(p.nameCols() + p.detailCols()));
+            try testing.expect(p.nameCols() >= 4);
+            try testing.expect(p.detailCols() >= 4);
+            // The text ends no further right than the box does. A box too
+            // narrow for two four-cell columns is the one case that cannot
+            // hold, and there is nothing sensible to draw there anyway.
+            if (p.boxW() >= p.cell_w * 2 + p.ui_cell_w * 8) {
+                try testing.expect(right <= p.boxW());
+            }
+        }
+    }
 }
 
 test "clicks land on the right host when entries are different heights" {
