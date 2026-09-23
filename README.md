@@ -36,9 +36,17 @@ What ztabb itself holds is small and bounded:
 
 ## Licence
 
-ztabb is MIT — see `LICENSE`. It bundles glyph data rasterized from **JetBrains
-Mono**, which is under the SIL Open Font License 1.1; `NOTICE` records that and
-`licenses/JetBrainsMono-OFL.txt` carries the terms.
+ztabb is MIT — see `LICENSE` — with one exception.
+
+`src/font.dat` and `src/font_data.zig` hold glyph data rasterized from
+**JetBrains Mono**. That makes them a Modified Version of the font, and OFL
+clause 5 requires the Font Software to be distributed *entirely* under the OFL
+and under no other licence. So those two files, and the glyph data compiled from
+them into the binary, are **OFL 1.1, not MIT**; everything else is MIT.
+
+Bundling is what clause 2 allows, on condition every copy carries the licence,
+which is why `licenses/JetBrainsMono-OFL.txt` ships in the repository and again
+inside `ztabb.app`. `NOTICE` spells out how each clause is met.
 
 ## Requirements
 

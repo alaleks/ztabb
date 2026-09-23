@@ -1,13 +1,31 @@
-ztabb bundles third-party material. The project itself is MIT (see LICENSE);
-the following is covered by its own terms and is reproduced beside it.
+ztabb is MIT licensed (see LICENSE), with one exception recorded here.
 
+--------------------------------------------------------------------------
 JetBrains Mono
   Copyright 2020 The JetBrains Mono Project Authors
   https://github.com/JetBrains/JetBrainsMono
   SIL Open Font License, Version 1.1 — licenses/JetBrainsMono-OFL.txt
 
   src/font.dat holds glyph coverage maps rasterized from JetBrains Mono by
-  tools/genfont.c. They are a derivative of the font and ship inside the
-  executable, so the OFL travels with them. The OFL permits this: the
-  bitmaps are bundled with software and not sold on their own, and "ztabb"
-  is not a reserved font name.
+  tools/genfont.c, and src/font_data.zig indexes them. They are a Modified
+  Version of the Font Software, so OFL clause 5 applies:
+
+      The Font Software, modified or unmodified, in part or in whole,
+      must be distributed entirely under this license, and must not be
+      distributed under any other license.
+
+  So those two files, and the glyph data compiled from them into the
+  executable, are under the OFL and NOT under ztabb's MIT licence. The MIT
+  licence covers the rest of the project.
+
+  This is a bundle, which clause 2 permits: "Original or Modified Versions
+  of the Font Software may be bundled, redistributed and/or sold with any
+  software, provided that each copy contains the above copyright notice and
+  this license." That copy travels in three places — this file, the licence
+  text beside it, and Contents/Resources/JetBrainsMono-OFL.txt inside the
+  application bundle.
+
+  Clause 1 is met because the font is never sold on its own. Clause 3 does
+  not arise: JetBrains Mono declares no Reserved Font Name, so the derived
+  data needs no rename. Clause 4 is why this file acknowledges the authors
+  rather than using their name to promote ztabb.

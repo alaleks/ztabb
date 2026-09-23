@@ -12,6 +12,10 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Framewor
 cp "$out/bin/ztabb" "$app/Contents/MacOS/ztabb"
 cp "$out/ztabb.icns" "$app/Contents/Resources/ztabb.icns"
 
+# The glyph data baked into the binary is a Modified Version of JetBrains
+# Mono, and the OFL requires every distributed copy to carry the licence.
+cp licenses/JetBrainsMono-OFL.txt "$app/Contents/Resources/"
+
 # Carry SDL3 inside the bundle and point the binary at that copy. Linking the
 # Homebrew path would leave an installed app broken the moment the formula is
 # upgraded or removed.

@@ -53,6 +53,9 @@ jobs:
           bin=zig-out/ztabb.app/Contents/MacOS/ztabb
           test -f zig-out/ztabb.app/Contents/Resources/ztabb.icns
           test -f zig-out/ztabb.app/Contents/Info.plist
+          # The bundled glyph data is a Modified Version of JetBrains Mono,
+          # and the OFL requires every distributed copy to carry the licence.
+          test -f zig-out/ztabb.app/Contents/Resources/JetBrainsMono-OFL.txt
           # A Homebrew path here means the installed app breaks when the
           # formula is upgraded or removed.
           if otool -L "$bin" | grep -q /opt/homebrew; then
