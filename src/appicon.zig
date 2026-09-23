@@ -17,10 +17,16 @@ const CORNER: f32 = 0.225;
 /// neighbouring icons in the Dock do not touch.
 const INSET: f32 = 0.06;
 
-/// Gradient endpoints, top-left to bottom-right. A bright teal into a deeper
-/// blue: legible on both light and dark Dock backgrounds.
-const GRAD_FROM: [3]f32 = .{ 0x3D, 0xD5, 0xC8 };
-const GRAD_TO: [3]f32 = .{ 0x27, 0x6A, 0xE0 };
+/// The ground, top-left to bottom-right: the terminal's own dark, lifted a
+/// little at the top so the square reads as a surface rather than a hole.
+const GRAD_FROM: [3]f32 = .{ 0x35, 0x3A, 0x44 };
+const GRAD_TO: [3]f32 = .{ 0x21, 0x24, 0x2A };
+/// The prompt. Bright enough to carry at 16px against that ground, which is
+/// the whole job of the mark.
+const MARK: [3]f32 = .{ 0x4F, 0xE0, 0xC4 };
+/// A hairline along the top edge, so the icon does not dissolve into a dark
+/// Dock the way a flat dark square does.
+const RIM: [3]f32 = .{ 0x4A, 0x51, 0x5C };
 
 const Point = struct { x: f32, y: f32 };
 
@@ -96,12 +102,17 @@ pub fn render(size: u32, out: []u32) void {
             }
 
             // Diagonal sweep, so the light falls the way macOS artwork does.
-            const rgb = gradientAt((x + y) / 2);
-            const mark = coverage(markDistance(x, y), feather);
+            var rgb = gradientAt((x + y) / 2);
 
-            var r = rgb[0] + (255 - rgb[0]) * mark;
-            var g = rgb[1] + (255 - rgb[1]) * mark;
-            var b = rgb[2] + (255 - rgb[2]) * mark;
+            // The rim rides the outer edge of the rounded square.
+            const edge = roundedBoxDistance(x - 0.5, y - 0.5, half, radius);
+            const rim = std.math.clamp(1 + edge / (2.5 / fsize), 0, 1) * body;
+            for (&rgb, RIM) |*c, rim_c| c.* += (rim_c - c.*) * rim;
+
+            const mark = coverage(markDistance(x, y), feather);
+            var r = rgb[0] + (MARK[0] - rgb[0]) * mark;
+            var g = rgb[1] + (MARK[1] - rgb[1]) * mark;
+            var b = rgb[2] + (MARK[2] - rgb[2]) * mark;
             r = std.math.clamp(r, 0, 255);
             g = std.math.clamp(g, 0, 255);
             b = std.math.clamp(b, 0, 255);
@@ -190,7 +201,69 @@ test "the background is a gradient, not a flat fill" {
     try testing.expect(lumaOf(near) > lumaOf(far));
 }
 
-test "the prompt reads as white against the body" {
+/// Relative luminance per WCAG, for checking the mark carries on the ground.
+fn luminance(px: u32) f64 {
+    const chan = struct {
+        fn f(v: u32) f64 {
+            const c = @as(f64, @floatFromInt(v & 0xff)) / 255.0;
+            return if (c <= 0.03928) c / 12.92 else std.math.pow(f64, (c + 0.055) / 1.055, 2.4);
+        }
+    }.f;
+    return 0.2126 * chan(px >> 16) + 0.7152 * chan(px >> 8) + 0.0722 * chan(px);
+}
+
+test "the ground is as dark as the terminal's own" {
+    const gpa = testing.allocator;
+    const size: u32 = 256;
+    const buf = try gpa.alloc(u32, size * size);
+    defer gpa.free(buf);
+    const px = renderAt(size, buf);
+
+    // Sampled inside the body, away from the mark and the rim.
+    const ground = px[(size / 4) * size + size / 2];
+    try testing.expect(luminance(ground) < 0.06);
+}
+
+test "the mark carries against the ground" {
+    const gpa = testing.allocator;
+    const size: u32 = 256;
+    const buf = try gpa.alloc(u32, size * size);
+    defer gpa.free(buf);
+    const px = renderAt(size, buf);
+
+    const at = struct {
+        fn f(pixels: []const u32, s: u32, fx: f32, fy: f32) u32 {
+            const xi: usize = @intFromFloat(fx * @as(f32, @floatFromInt(s)));
+            const yi: usize = @intFromFloat(fy * @as(f32, @floatFromInt(s)));
+            return pixels[yi * s + xi];
+        }
+    }.f;
+
+    const mark = at(px, size, 0.47, 0.5);
+    const ground = at(px, size, 0.5, 0.25);
+    const ratio = (luminance(mark) + 0.05) / (luminance(ground) + 0.05);
+    // Well past the 4.5:1 that counts as readable, because at 16px the mark
+    // is a few pixels wide and has nothing else to help it.
+    try testing.expect(ratio >= 7.0);
+}
+
+test "the rim keeps the icon off a dark background" {
+    const gpa = testing.allocator;
+    const size: u32 = 256;
+    const buf = try gpa.alloc(u32, size * size);
+    defer gpa.free(buf);
+    const px = renderAt(size, buf);
+
+    const mid = size / 2;
+    // Just inside the left edge of the body, against the middle of it.
+    var edge_x: usize = 0;
+    while (edge_x < size and alphaOf(px[mid * size + edge_x]) < 250) edge_x += 1;
+    const rim = px[mid * size + edge_x + 1];
+    const inner = px[mid * size + mid / 2];
+    try testing.expect(luminance(rim) > luminance(inner));
+}
+
+test "the prompt stands out from the body" {
     const gpa = testing.allocator;
     const size: u32 = 256;
     const buf = try gpa.alloc(u32, size * size);
@@ -208,9 +281,8 @@ test "the prompt reads as white against the body" {
     const on_mark = at(px, size, 0.47, 0.5);
     const on_rule = at(px, size, 0.63, 0.655);
     const body = at(px, size, 0.5, 0.25);
-    try testing.expect(lumaOf(on_mark) > lumaOf(body));
-    try testing.expect(lumaOf(on_rule) > lumaOf(body));
-    try testing.expect(lumaOf(on_mark) > 700); // close to white
+    try testing.expect(lumaOf(on_mark) > lumaOf(body) * 2);
+    try testing.expect(lumaOf(on_rule) > lumaOf(body) * 2);
 }
 
 test "the mark stays legible at list size" {
@@ -221,9 +293,12 @@ test "the mark stays legible at list size" {
     defer gpa.free(buf);
     const px = renderAt(size, buf);
 
+    // Count what stands clearly off the ground rather than an absolute
+    // brightness: the mark is a bright teal, not white.
+    const ground = lumaOf(px[(size / 4) * size + size / 2]);
     var bright: usize = 0;
     for (px) |v| {
-        if (alphaOf(v) > 128 and lumaOf(v) > 560) bright += 1;
+        if (alphaOf(v) > 128 and lumaOf(v) > ground * 2) bright += 1;
     }
     try testing.expect(bright >= 10);
 }

@@ -124,6 +124,8 @@ pub const Renderer = struct {
     /// The point size and display density the atlases were baked for.
     points: u32,
     density: u32,
+    /// Where the interface face's marks sit inside its cell.
+    ui_ink: font.Ink = .{ .top = 0, .bottom = 0 },
     /// Which glyphs have nothing to draw, for each atlas in use.
     blank_regular: font.BlankSet = .{},
     blank_bold: font.BlankSet = .{},
@@ -179,6 +181,7 @@ pub const Renderer = struct {
         self.ui = tex;
         self.ui_size = size;
         self.blank_ui = font.BlankSet.build(size);
+        self.ui_ink = font.Ink.measure(size);
     }
 
     /// Icons are sized off the interface text, not the tab bar: an icon a
@@ -389,6 +392,17 @@ pub const Renderer = struct {
 
     pub fn uiCellH(self: *const Renderer) f32 {
         return @floatFromInt(self.ui_size.h);
+    }
+
+    /// The y to hand `drawUiText` so its marks sit centred in a box, level
+    /// with an icon centred in the same box.
+    ///
+    /// Centring the cell instead leaves text low: the cell carries the whole
+    /// font box, and the room above the capitals is not matched below.
+    pub fn uiTextY(self: *const Renderer, box_top: f32, box_h: f32) f32 {
+        const ink_h: f32 = @floatFromInt(self.ui_ink.height());
+        const ink_top: f32 = @floatFromInt(self.ui_ink.top);
+        return @round(box_top + (box_h - ink_h) / 2 - ink_top);
     }
 
     /// Draws a UTF-8 string starting at a pixel position, one cell per code
@@ -616,7 +630,7 @@ pub const Renderer = struct {
             self.drawTabLabel(
                 tab.labelParts(),
                 label_x,
-                top + (bar_h - self.uiCellH()) / 2,
+                self.uiTextY(top, bar_h),
                 budget,
                 fg,
                 th.tab_inactive_fg,
@@ -741,7 +755,7 @@ pub const Renderer = struct {
         _ = self.drawUiText(
             "SSH hosts  (\u{2191}/\u{2193} or click, Enter open, Esc cancel)",
             x + cw,
-            y + (ch - self.uiCellH()) / 2,
+            self.uiTextY(y, ch),
             th.ansi[4],
         );
 
@@ -757,7 +771,7 @@ pub const Renderer = struct {
             if (is_sel) self.fill(x + cw / 2, row_y, p.boxW() - cw, ch, th.selection);
 
             const fg = if (is_sel) th.fg else th.hl_command;
-            const text_y = row_y + (ch - self.uiCellH()) / 2;
+            const text_y = self.uiTextY(row_y, ch);
             const used = self.drawUiText(host.alias, x + cw, text_y, fg);
             if (host.detail.len > 0) {
                 const gap = @max(used + self.uiCellW(), self.uiCellW() * 18);
@@ -772,7 +786,7 @@ pub const Renderer = struct {
         const ch: f32 = @floatFromInt(self.cellH());
         const y = height - ch * 1.5;
         self.fill(0, y, width, ch * 1.5, th.tab_bar_bg);
-        _ = self.drawUiText(text, cw, y + (ch * 1.5 - self.uiCellH()) / 2, th.fg);
+        _ = self.drawUiText(text, cw, self.uiTextY(y, ch * 1.5), th.fg);
     }
 };
 

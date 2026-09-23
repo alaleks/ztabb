@@ -133,6 +133,43 @@ pub fn isBlank(cp: u21, size: Size) bool {
     return true;
 }
 
+/// The band of the cell that text visually occupies: the top of the capitals
+/// down to the baseline.
+///
+/// The cell holds the whole font box -- full ascent plus descent -- so text
+/// does not fill it, and the room above the capitals is not matched below.
+/// Centring the cell therefore sets a label low against an icon centred on its
+/// own outline. Descenders and tall punctuation are deliberately left out:
+/// the eye lines text up on the capitals, not on the tail of a `g` or the top
+/// of a bracket.
+pub const Ink = struct {
+    /// First row of the capitals, and the baseline.
+    top: u32,
+    bottom: u32,
+
+    pub fn height(self: Ink) u32 {
+        return self.bottom - self.top;
+    }
+
+    pub fn measure(size: Size) Ink {
+        var top: u32 = size.h;
+        var bottom: u32 = 0;
+        for ("ABEHMNTXZ0123456789") |cp| {
+            const g = glyph(cp, size);
+            for (0..size.h) |y| {
+                for (0..size.w) |x| {
+                    if (g[y * size.w + x] <= 40) continue;
+                    const row: u32 = @intCast(y);
+                    if (row < top) top = row;
+                    if (row >= bottom) bottom = row + 1;
+                }
+            }
+        }
+        if (bottom <= top) return .{ .top = 0, .bottom = size.h };
+        return .{ .top = top, .bottom = bottom };
+    }
+};
+
 /// One bit per glyph, marking those with nothing to draw.
 ///
 /// The renderer asks this for every cell on screen; scanning the glyph each
@@ -398,6 +435,48 @@ test "every glyph slice is the size the metrics promise" {
         try testing.expectEqual(size.pixels(), glyph('A', size).len);
         try testing.expectEqual(size.pixels(), glyph(0x2718, size).len);
     }
+}
+
+test "the cap band sits inside the cell, clear of both edges" {
+    for (0..section_count) |i| {
+        const size = sectionAt(i);
+        const ink = Ink.measure(size);
+        try testing.expect(ink.top > 0);
+        try testing.expect(ink.bottom < size.h); // the descender space below
+        try testing.expect(ink.height() >= size.h / 3);
+    }
+}
+
+test "the cap band excludes descenders and tall punctuation" {
+    const size = uiSize(default_points, 2);
+    const ink = Ink.measure(size);
+
+    const bounds = struct {
+        fn f(cp: u21, sz: Size) struct { top: u32, bottom: u32 } {
+            const g = glyph(cp, sz);
+            var t: u32 = sz.h;
+            var b: u32 = 0;
+            for (0..sz.h) |y| {
+                for (0..sz.w) |x| {
+                    if (g[y * sz.w + x] <= 40) continue;
+                    const row: u32 = @intCast(y);
+                    if (row < t) t = row;
+                    if (row >= b) b = row + 1;
+                }
+            }
+            return .{ .top = t, .bottom = b };
+        }
+    }.f;
+
+    // A descender reaches below the baseline the band ends at...
+    try testing.expect(bounds('g', size).bottom > ink.bottom);
+    // ...and a bracket reaches above where the capitals start.
+    try testing.expect(bounds('|', size).top < ink.top);
+    // The band brackets a capital: round digits overshoot the baseline by a
+    // hair, which is how they are drawn, so the band can reach a row lower.
+    try testing.expect(ink.top <= bounds('A', size).top);
+    try testing.expect(ink.bottom >= bounds('A', size).bottom);
+    try testing.expect(ink.bottom <= bounds('A', size).bottom + 2);
 }
 
 test "the blank set agrees with a direct scan" {
