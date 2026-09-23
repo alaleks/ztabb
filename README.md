@@ -1,12 +1,16 @@
-<img src=".github/logo.gif" alt="ztabb" width="120" align="right">
+<p align="center">
+  <img src=".github/logo.gif" alt="ztabb" width="128" height="128">
+</p>
 
-# ztabb
+<h1 align="center">ztabb</h1>
 
-A fast, lightweight terminal: one native process, a bundled typeface, and no
-runtime to feed. macOS, Linux and Windows.
+<p align="center">
+  A fast, lightweight terminal: one native process, a bundled typeface,<br>
+  and no runtime to feed. macOS, Linux and Windows.
+</p>
 
-Tabs, a VT/xterm emulator, hosts read from `~/.ssh/config`, light and dark
-themes, and syntax colouring on the line you are typing.
+Tabs and panes, a VT/xterm emulator, hosts read from `~/.ssh/config`, light and
+dark themes, and syntax colouring on the line you are typing.
 
 ## What it costs
 
