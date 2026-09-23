@@ -80,6 +80,9 @@ pub const App = struct {
     title_buf: [tabs_mod.MAX_LABEL + 16:0]u8 = [_:0]u8{0} ** (tabs_mod.MAX_LABEL + 16),
 
     pacer: IdlePacer = .{},
+    /// The range the mouse is drawing, or has drawn, over the terminal.
+    selection: ?term.Selection = null,
+    dragging: bool = false,
     picker: ?Picker = null,
     picker_rows: [ssh.MAX_HOSTS]rnd.HostRow = undefined,
     toast: ?Toast = null,
@@ -267,6 +270,8 @@ pub const App = struct {
             sdl.EVENT_KEY_DOWN => self.onKeyDown(event.key),
             sdl.EVENT_TEXT_INPUT => self.onTextInput(event.text),
             sdl.EVENT_MOUSE_BUTTON_DOWN => self.onMouseDown(event.button),
+            sdl.EVENT_MOUSE_BUTTON_UP => self.dragging = false,
+            sdl.EVENT_MOUSE_MOTION => self.onMouseMotion(event.motion),
             sdl.EVENT_MOUSE_WHEEL => self.onWheel(event.wheel),
             else => {},
         }
@@ -293,6 +298,7 @@ pub const App = struct {
 
         const tab = self.tabs.active() orelse return;
         tab.terminal.scrollToBottom();
+        self.clearSelection();
 
         // Shift+PageUp/PageDown scroll the history rather than reaching the shell.
         if (mods & sdl.KMOD_SHIFT != 0) {
@@ -324,13 +330,19 @@ pub const App = struct {
             .close_tab => self.closeActiveTab(),
             .ssh_picker => self.openPicker(),
             .paste => self.paste(),
-            .copy_line => if (self.tabs.active()) |tab| {
-                // No selection model yet, so copy takes the current line.
-                self.copyCursorLine(tab);
+            .copy_line => self.copy(),
+            .prev_tab => {
+                self.tabs.prev();
+                self.clearSelection();
             },
-            .prev_tab => self.tabs.prev(),
-            .next_tab => self.tabs.next(),
-            .select_tab => |i| self.tabs.switchTo(i) catch {},
+            .next_tab => {
+                self.tabs.next();
+                self.clearSelection();
+            },
+            .select_tab => |i| {
+                self.tabs.switchTo(i) catch {};
+                self.clearSelection();
+            },
             .zoom_in => self.setFontPoints(font.stepPoints(self.font_points, 1)),
             .zoom_out => self.setFontPoints(font.stepPoints(self.font_points, -1)),
             .zoom_reset => self.setFontPoints(font.default_points),
@@ -390,6 +402,21 @@ pub const App = struct {
         // The title strip belongs to the window: clicks there drag it.
         if (y < self.title_h) return;
 
+        // Below the chrome is the terminal: a press there starts a selection.
+        if (y >= self.chromeH()) {
+            const tab = self.tabs.active() orelse return;
+            const at = self.renderer.cellAt(&tab.terminal, self.chromeH(), x, y);
+            self.selection = .{
+                .anchor_row = at.row,
+                .anchor_col = at.col,
+                .head_row = at.row,
+                .head_col = at.col,
+            };
+            self.dragging = true;
+            self.ui_dirty = true;
+            return;
+        }
+
         const bar = self.renderer.tabBar(self.tabs.count, @floatFromInt(self.win_w));
         switch (bar.hit(x, y - self.title_h)) {
             .new_tab => self.newShellTab(),
@@ -403,6 +430,25 @@ pub const App = struct {
         }
     }
 
+    /// Extends the selection while a drag is in progress.
+    fn onMouseMotion(self: *App, ev: sdl.MouseMotionEvent) void {
+        if (!self.dragging) return;
+        const tab = self.tabs.active() orelse return;
+        const scale: f32 = @floatFromInt(self.dpi_scale);
+        const at = self.renderer.cellAt(&tab.terminal, self.chromeH(), ev.x * scale, ev.y * scale);
+        if (self.selection) |*sel| {
+            sel.head_row = at.row;
+            sel.head_col = at.col;
+            sel.active = true;
+            self.ui_dirty = true;
+        }
+    }
+
+    /// Where the terminal area begins, below the title strip and the tabs.
+    fn chromeH(self: *const App) f32 {
+        return self.title_h + @as(f32, @floatFromInt(self.renderer.cellH() * rnd.TAB_BAR_CELLS));
+    }
+
     fn onWheel(self: *App, ev: sdl.MouseWheelEvent) void {
         const tab = self.tabs.active() orelse return;
         // Three lines per notch, the usual convention.
@@ -411,6 +457,17 @@ pub const App = struct {
     }
 
     // -- commands ----------------------------------------------------------
+
+    /// Drops the selection. Typing or switching tabs invalidates what was
+    /// highlighted, and leaving it on screen would be a lie about what Cmd+C
+    /// is about to copy.
+    fn clearSelection(self: *App) void {
+        if (self.selection != null) {
+            self.selection = null;
+            self.dragging = false;
+            self.ui_dirty = true;
+        }
+    }
 
     fn newShellTab(self: *App) void {
         _ = self.tabs.addShell(self.cols, self.rows) catch |err| {
@@ -434,16 +491,45 @@ pub const App = struct {
         defer sdl.freeClipboardText(text);
         if (text.len == 0) return;
         tab.terminal.scrollToBottom();
-        // Bracketed paste is not negotiated yet, so send the text as typed but
-        // strip the newlines that would run a command the user did not submit.
+
+        // When the program asked for bracketed paste, wrap the text in the
+        // markers: that is how a shell tells pasted text from typing, and why
+        // pasting a command does not run it until Enter.
+        const bracketed = tab.terminal.bracketed_paste;
+        if (bracketed) tab.pty.write("\x1b[200~") catch {};
+
         var buf: [4096]u8 = undefined;
         var n: usize = 0;
         for (text) |c| {
-            if (n == buf.len) break;
+            if (n == buf.len) {
+                tab.pty.write(buf[0..n]) catch {};
+                n = 0;
+            }
+            // A newline is Return on the wire. Inside the markers the program
+            // sees it as pasted, so it is safe to send as-is; outside them it
+            // would submit the line, which is the old hazard.
             buf[n] = if (c == '\n') '\r' else c;
             n += 1;
         }
         tab.pty.write(buf[0..n]) catch {};
+
+        if (bracketed) tab.pty.write("\x1b[201~") catch {};
+    }
+
+    /// Copies the selection, or the cursor's line when there is none.
+    fn copy(self: *App) void {
+        const tab = self.tabs.active() orelse return;
+        if (self.selection) |sel| {
+            if (!sel.isEmpty()) {
+                var buf: [64 * 1024:0]u8 = undefined;
+                const text = term.selectedText(&tab.terminal, sel, buf[0 .. buf.len - 1]);
+                buf[text.len] = 0;
+                sdl.setClipboardText(@ptrCast(&buf));
+                self.showToast("copied {d} chars", .{text.len});
+                return;
+            }
+        }
+        self.copyCursorLine(tab);
     }
 
     fn copyCursorLine(self: *App, tab: *tabs_mod.Tab) void {
@@ -574,7 +660,7 @@ pub const App = struct {
                 rnd.shellLineOverlay(&tab.terminal, th_, &text_buf, &color_buf)
             else
                 null;
-            self.renderer.drawTerminal(&tab.terminal, th_, bar_h, overlay);
+            self.renderer.drawTerminal(&tab.terminal, th_, bar_h, overlay, self.selection);
             self.updateWindowTitle(tab);
             if (tab.terminal.bell) tab.terminal.bell = false;
             tab.terminal.dirty = false;

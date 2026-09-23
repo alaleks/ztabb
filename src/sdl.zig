@@ -178,6 +178,19 @@ pub const MouseWheelEvent = extern struct {
     integer_y: i32,
 };
 
+pub const MouseMotionEvent = extern struct {
+    type_: u32,
+    reserved: u32,
+    timestamp: u64,
+    window_id: u32,
+    which: u32,
+    state: u32,
+    x: f32,
+    y: f32,
+    xrel: f32,
+    yrel: f32,
+};
+
 pub const MouseButtonEvent = extern struct {
     type_: u32,
     reserved: u32,
@@ -200,6 +213,7 @@ pub const Event = extern union {
     window: WindowEvent,
     wheel: MouseWheelEvent,
     button: MouseButtonEvent,
+    motion: MouseMotionEvent,
     _pad: [128]u8,
 };
 

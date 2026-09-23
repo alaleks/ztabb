@@ -87,7 +87,7 @@ they always do.
 | `Cmd+D`                           | Toggle light / dark                  |
 | `Cmd+L`                           | Toggle command colouring             |
 | `Cmd+=` / `Cmd+-` / `Cmd+0`       | Font size: up / down / back to 13 pt |
-| `Cmd+C` / `Cmd+V`                 | Copy current line / paste            |
+| `Cmd+C` / `Cmd+V`                 | Copy selection or line / paste       |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll history                       |
 | Mouse wheel                       | Scroll history                       |
 
@@ -95,7 +95,14 @@ No binding uses Shift as an extra modifier: under the Ctrl+Shift form it is
 already spoken for, and such a combination would be unreachable there.
 
 Mouse: **+** opens a tab, the globe beside it drops down the SSH hosts, a click
-selects a tab, **×** closes one.
+selects a tab, **×** closes one. Dragging over the terminal selects a range;
+`Cmd+C` copies it, falling back to the cursor's line when nothing is selected.
+Typing or switching tabs clears the selection, so what is highlighted is always
+what would be copied.
+
+Pasting honours **bracketed paste**: when the program has asked for it, the text
+arrives wrapped in markers, so a shell can tell it from typing and will not run
+a pasted command until Enter.
 
 `ZTABB_THEME=light ztabb` opens in the light theme.
 
@@ -272,7 +279,7 @@ ordinary system title.
 - [x] Application icon and an `.app` bundle
 - [x] JetBrains Mono at 13 pt, with size steps
 - [x] Memory ceiling on a tab's history
-- [ ] Mouse selection and copying a range
-- [ ] Bracketed paste
+- [x] Mouse selection and copying a range
+- [x] Bracketed paste
 - [ ] Splitting a tab into panes
 - [ ] Custom themes and key bindings from a config file

@@ -482,6 +482,7 @@ pub const Renderer = struct {
         th: *const theme.Theme,
         top: f32,
         hl: ?HighlightOverlay,
+        sel: ?term.Selection,
     ) void {
         const cw: f32 = @floatFromInt(self.cellW());
         const ch: f32 = @floatFromInt(self.cellH());
@@ -496,10 +497,18 @@ pub const Renderer = struct {
             // Background first, merging horizontal runs of one colour so a
             // full-width bar costs one draw call instead of `cols` of them.
             var run_start: u32 = 0;
-            var run_color: u32 = term.Terminal.resolve(cells[0], th).bg;
+            var run_color: u32 = if (sel != null and sel.?.contains(row, 0))
+                th.selection
+            else
+                term.Terminal.resolve(cells[0], th).bg;
             for (1..t.cols + 1) |ci| {
                 const c: u32 = @intCast(ci);
-                const color = if (c < t.cols) term.Terminal.resolve(cells[c], th).bg else ~run_color;
+                const color = if (c < t.cols) blk: {
+                    if (sel) |sl| {
+                        if (sl.contains(row, c)) break :blk th.selection;
+                    }
+                    break :blk term.Terminal.resolve(cells[c], th).bg;
+                } else ~run_color;
                 if (color == run_color) continue;
                 if (run_color != th.bg) {
                     self.fill(
@@ -706,6 +715,18 @@ pub const Renderer = struct {
     }
 
     // -- overlays ----------------------------------------------------------
+
+    /// The grid cell under a point, clamped to the grid. `top` is where the
+    /// terminal area begins.
+    pub fn cellAt(self: *const Renderer, t: *const term.Terminal, top: f32, x: f32, y: f32) struct { row: u32, col: u32 } {
+        const cw: f32 = @floatFromInt(self.cellW());
+        const ch: f32 = @floatFromInt(self.cellH());
+        const col_f = (x - self.padX()) / cw;
+        const row_f = (y - top - self.padY()) / ch;
+        const col: u32 = if (col_f <= 0) 0 else @intFromFloat(col_f);
+        const row: u32 = if (row_f <= 0) 0 else @intFromFloat(row_f);
+        return .{ .row = @min(row, t.rows - 1), .col = @min(col, t.cols) };
+    }
 
     /// Draws a split label: the path dim, the directory bright.
     ///

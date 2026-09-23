@@ -135,6 +135,9 @@ pub const Terminal = struct {
     dirty: bool = true,
     /// Set by BEL; the caller may flash the tab.
     bell: bool = false,
+    /// DECSET 2004. When on, pasted text is wrapped in markers so the program
+    /// can tell it from typing and refuse to run it.
+    bracketed_paste: bool = false,
 
     state: ParseState = .ground,
     params: [MAX_PARAMS]u32 = [_]u32{0} ** MAX_PARAMS,
@@ -564,6 +567,7 @@ pub const Terminal = struct {
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.cursor_visible = true;
+        self.bracketed_paste = false;
         self.wrap_pending = false;
         self.scroll_top = 0;
         self.scroll_bot = self.rows - 1;
@@ -891,6 +895,7 @@ pub const Terminal = struct {
         for (self.params[0..self.param_count]) |mode| {
             switch (mode) {
                 25 => self.cursor_visible = on, // DECTCEM
+                2004 => self.bracketed_paste = on,
                 1049, 1047, 47 => if (on) self.enterAltScreen() else self.leaveAltScreen(),
                 else => {},
             }
@@ -1035,6 +1040,81 @@ pub const Terminal = struct {
         }
     }
 };
+
+/// A range of the visible grid, as the mouse drew it.
+///
+/// Anchored where the drag began and headed where it is now, so dragging
+/// backwards selects the same span as dragging forwards.
+pub const Selection = struct {
+    anchor_row: u32,
+    anchor_col: u32,
+    head_row: u32,
+    head_col: u32,
+    /// Set once the pointer has moved; a click alone selects nothing.
+    active: bool = false,
+
+    const Point = struct { row: u32, col: u32 };
+
+    fn ordered(self: Selection) struct { start: Point, end: Point } {
+        const a = Point{ .row = self.anchor_row, .col = self.anchor_col };
+        const b = Point{ .row = self.head_row, .col = self.head_col };
+        const a_first = a.row < b.row or (a.row == b.row and a.col <= b.col);
+        return if (a_first) .{ .start = a, .end = b } else .{ .start = b, .end = a };
+    }
+
+    /// Whether a cell of the viewport falls inside the selection. The end
+    /// column is exclusive, so a drag that has not left its cell selects
+    /// nothing.
+    pub fn contains(self: Selection, row: u32, col: u32) bool {
+        if (!self.active) return false;
+        const r = self.ordered();
+        if (row < r.start.row or row > r.end.row) return false;
+        if (row == r.start.row and col < r.start.col) return false;
+        if (row == r.end.row and col >= r.end.col) return false;
+        return true;
+    }
+
+    pub fn isEmpty(self: Selection) bool {
+        if (!self.active) return true;
+        const r = self.ordered();
+        return r.start.row == r.end.row and r.start.col == r.end.col;
+    }
+};
+
+/// Writes the selected text into `buf`, as UTF-8.
+///
+/// Trailing blanks are dropped from every line but the last, because a
+/// terminal pads its rows with spaces and pasting them back is never wanted.
+pub fn selectedText(t: *const Terminal, sel: Selection, buf: []u8) []const u8 {
+    if (sel.isEmpty()) return buf[0..0];
+    const r = sel.ordered();
+    var n: usize = 0;
+
+    var row = r.start.row;
+    while (row <= r.end.row and row < t.rows) : (row += 1) {
+        const cells = t.viewRow(row);
+        const from = if (row == r.start.row) r.start.col else 0;
+        const to = if (row == r.end.row) @min(r.end.col, t.cols) else t.cols;
+
+        var line_start = n;
+        var col = from;
+        while (col < to) : (col += 1) {
+            const cp = cells[col].ch;
+            const len = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
+            if (n + len > buf.len) return buf[0..n];
+            n += std.unicode.utf8Encode(cp, buf[n..]) catch break;
+        }
+        while (n > line_start and buf[n - 1] == ' ') n -= 1;
+        line_start = n;
+
+        if (row != r.end.row) {
+            if (n == buf.len) return buf[0..n];
+            buf[n] = '\n';
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
 
 // -- tests -----------------------------------------------------------------
 
@@ -1216,6 +1296,113 @@ test "history still grows on demand after a resize" {
     try testing.expect(t.sb_len > before);
     try testing.expectEqual(@as(u21, 'c'), t.scrollbackRow(1).?[0].ch);
     try testing.expectEqual(@as(u21, 'a'), t.scrollbackRow(t.sb_len).?[0].ch);
+}
+
+test "a selection covers the cells between its ends" {
+    const sel = Selection{ .anchor_row = 1, .anchor_col = 2, .head_row = 1, .head_col = 5, .active = true };
+    try testing.expect(!sel.contains(1, 1));
+    try testing.expect(sel.contains(1, 2));
+    try testing.expect(sel.contains(1, 4));
+    try testing.expect(!sel.contains(1, 5)); // the end column is exclusive
+    try testing.expect(!sel.contains(0, 3));
+    try testing.expect(!sel.contains(2, 3));
+}
+
+test "dragging backwards selects the same span" {
+    const forward = Selection{ .anchor_row = 0, .anchor_col = 1, .head_row = 2, .head_col = 4, .active = true };
+    const backward = Selection{ .anchor_row = 2, .anchor_col = 4, .head_row = 0, .head_col = 1, .active = true };
+    for (0..4) |row| {
+        for (0..8) |col| {
+            try testing.expectEqual(
+                forward.contains(@intCast(row), @intCast(col)),
+                backward.contains(@intCast(row), @intCast(col)),
+            );
+        }
+    }
+}
+
+test "a selection spanning rows takes whole lines in the middle" {
+    const sel = Selection{ .anchor_row = 0, .anchor_col = 3, .head_row = 2, .head_col = 2, .active = true };
+    try testing.expect(!sel.contains(0, 2));
+    try testing.expect(sel.contains(0, 3));
+    try testing.expect(sel.contains(1, 0)); // middle row, start
+    try testing.expect(sel.contains(1, 99)); // middle row, end
+    try testing.expect(sel.contains(2, 1));
+    try testing.expect(!sel.contains(2, 2));
+}
+
+test "a click that never moved selects nothing" {
+    const idle = Selection{ .anchor_row = 1, .anchor_col = 1, .head_row = 1, .head_col = 1 };
+    try testing.expect(idle.isEmpty());
+    try testing.expect(!idle.contains(1, 1));
+
+    const clicked = Selection{ .anchor_row = 1, .anchor_col = 1, .head_row = 1, .head_col = 1, .active = true };
+    try testing.expect(clicked.isEmpty());
+}
+
+test "selected text comes back as it reads on screen" {
+    var t = try testTerm(20, 4);
+    defer t.deinit();
+    t.write("hello world\r\nsecond line\r\nthird");
+
+    var buf: [128]u8 = undefined;
+    const one_row = Selection{ .anchor_row = 0, .anchor_col = 6, .head_row = 0, .head_col = 11, .active = true };
+    try testing.expectEqualStrings("world", selectedText(&t, one_row, &buf));
+
+    const across = Selection{ .anchor_row = 0, .anchor_col = 6, .head_row = 1, .head_col = 6, .active = true };
+    try testing.expectEqualStrings("world\nsecond", selectedText(&t, across, &buf));
+}
+
+test "the padding a terminal writes is not copied with the text" {
+    // Rows are space-filled to the width; pasting that back is never wanted.
+    var t = try testTerm(20, 4);
+    defer t.deinit();
+    t.write("ab\r\ncd");
+
+    var buf: [128]u8 = undefined;
+    const sel = Selection{ .anchor_row = 0, .anchor_col = 0, .head_row = 1, .head_col = 20, .active = true };
+    try testing.expectEqualStrings("ab\ncd", selectedText(&t, sel, &buf));
+}
+
+test "selected text handles multi-byte characters" {
+    var t = try testTerm(20, 2);
+    defer t.deinit();
+    t.write("Привет мир");
+
+    var buf: [128]u8 = undefined;
+    const sel = Selection{ .anchor_row = 0, .anchor_col = 0, .head_row = 0, .head_col = 6, .active = true };
+    try testing.expectEqualStrings("Привет", selectedText(&t, sel, &buf));
+}
+
+test "an empty selection yields no text" {
+    var t = try testTerm(10, 2);
+    defer t.deinit();
+    t.write("abc");
+    var buf: [64]u8 = undefined;
+    const empty = Selection{ .anchor_row = 0, .anchor_col = 1, .head_row = 0, .head_col = 1, .active = true };
+    try testing.expectEqualStrings("", selectedText(&t, empty, &buf));
+}
+
+test "copying never runs past the buffer it was given" {
+    var t = try testTerm(40, 6);
+    defer t.deinit();
+    for (0..6) |_| t.write("0123456789012345678901234567890123456789");
+
+    var small: [10]u8 = undefined;
+    const all = Selection{ .anchor_row = 0, .anchor_col = 0, .head_row = 5, .head_col = 40, .active = true };
+    const out = selectedText(&t, all, &small);
+    try testing.expect(out.len <= small.len);
+}
+
+test "selection reads the scrolled-back view, not the live screen" {
+    var t = try testTerm(6, 2);
+    defer t.deinit();
+    t.write("aaa\r\nbbb\r\nccc\r\nddd");
+    t.scrollView(2);
+
+    var buf: [64]u8 = undefined;
+    const sel = Selection{ .anchor_row = 0, .anchor_col = 0, .head_row = 0, .head_col = 3, .active = true };
+    try testing.expectEqualStrings("aaa", selectedText(&t, sel, &buf));
 }
 
 test "init clears the grid and sets a full-screen scroll region" {
@@ -1598,6 +1785,33 @@ test "xterm256 covers the cube and the grey ramp" {
     try testing.expectEqual(@as(u32, 0xFFFFFF), Terminal.xterm256(231, &theme.dark));
     try testing.expectEqual(@as(u32, 0x080808), Terminal.xterm256(232, &theme.dark));
     try testing.expectEqual(@as(u32, 0xEEEEEE), Terminal.xterm256(255, &theme.dark));
+}
+
+test "bracketed paste mode is tracked" {
+    var t = try testTerm(10, 2);
+    defer t.deinit();
+    try testing.expect(!t.bracketed_paste);
+    t.write("\x1b[?2004h");
+    try testing.expect(t.bracketed_paste);
+    t.write("\x1b[?2004l");
+    try testing.expect(!t.bracketed_paste);
+}
+
+test "a reset turns bracketed paste back off" {
+    // Otherwise a shell that crashed with it on would leave the next one
+    // receiving markers it never asked for.
+    var t = try testTerm(10, 2);
+    defer t.deinit();
+    t.write("\x1b[?2004h\x1bc");
+    try testing.expect(!t.bracketed_paste);
+}
+
+test "several private modes in one sequence all apply" {
+    var t = try testTerm(10, 2);
+    defer t.deinit();
+    t.write("\x1b[?25;2004h");
+    try testing.expect(t.cursor_visible);
+    try testing.expect(t.bracketed_paste);
 }
 
 test "DECTCEM toggles the cursor" {
