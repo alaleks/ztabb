@@ -829,13 +829,14 @@ pub const Renderer = struct {
     }
 
     /// Geometry of the host picker, shared by drawing and mouse hit testing.
-    pub fn picker(self: *const Renderer, count: usize, width: f32, height: f32) Picker {
+    pub fn picker(self: *const Renderer, rows: []const HostRow, width: f32, height: f32) Picker {
         return .{
             .cell_w = @floatFromInt(self.cellW()),
             .cell_h = @floatFromInt(self.cellH()),
+            .ui_cell_w = self.uiCellW(),
             .width = width,
             .height = height,
-            .count = count,
+            .rows = rows,
         };
     }
 
@@ -850,7 +851,7 @@ pub const Renderer = struct {
     ) void {
         const cw: f32 = @floatFromInt(self.cellW());
         const ch: f32 = @floatFromInt(self.cellH());
-        const p = self.picker(hosts.len, width, height);
+        const p = self.picker(hosts, width, height);
         const x = p.boxX();
         const y = p.boxY();
 
@@ -872,18 +873,32 @@ pub const Renderer = struct {
         }
 
         const first = p.firstVisible(selected);
-        for (hosts[first..][0..p.visible()], 0..) |host, i| {
-            const row_y = p.rowY(i);
+        const name_cols = p.nameCols();
+        const detail_x = x + cw + self.uiCellW() * @as(f32, @floatFromInt(name_cols));
+        var line: usize = 0;
+        for (0..p.visibleFrom(first)) |i| {
+            const host = hosts[first + i];
+            const span = p.span(first + i);
+            const row_y = p.lineY(line);
             const is_sel = first + i == selected;
-            if (is_sel) self.fill(x + cw / 2, row_y, p.boxW() - cw, ch, th.selection);
-
-            const fg = if (is_sel) th.fg else th.hl_command;
-            const text_y = self.uiTextY(row_y, ch);
-            const used = self.drawUiText(host.alias, x + cw, text_y, fg);
-            if (host.detail.len > 0) {
-                const gap = @max(used + self.uiCellW(), self.uiCellW() * 18);
-                _ = self.drawUiText(host.detail, x + cw + gap, text_y, th.tab_inactive_fg);
+            if (is_sel) {
+                const row_h = ch * @as(f32, @floatFromInt(span));
+                self.fill(x + cw / 2, row_y, p.boxW() - cw, row_h, th.selection);
             }
+
+            // The name wraps within its column; the address stays put.
+            const fg = if (is_sel) th.fg else th.hl_command;
+            var at: usize = 0;
+            for (0..span) |k| {
+                const end = utf8Advance(host.alias, at, name_cols -| 1);
+                const y_k = row_y + ch * @as(f32, @floatFromInt(k));
+                _ = self.drawUiText(host.alias[at..end], x + cw, self.uiTextY(y_k, ch), fg);
+                at = end;
+            }
+            if (host.detail.len > 0) {
+                _ = self.drawUiText(host.detail, detail_x, self.uiTextY(row_y, ch), th.tab_inactive_fg);
+            }
+            line += span;
         }
     }
 
@@ -949,9 +964,12 @@ pub const Renderer = struct {
 pub const Picker = struct {
     cell_w: f32,
     cell_h: f32,
+    /// Interface cell width. The name column is measured in these, since that
+    /// is the face the aliases are drawn in.
+    ui_cell_w: f32,
     width: f32,
     height: f32,
-    count: usize,
+    rows: []const HostRow,
 
     /// Rows the box will show at once, before the window's own height is
     /// taken into account. A list that fits should not have to be scrolled.
@@ -960,22 +978,59 @@ pub const Picker = struct {
     /// Title row plus padding above and below the list.
     const CHROME_ROWS: usize = 4;
     const FIRST_ROW: f32 = 2.0;
+    /// Lines one entry may wrap onto before its name is simply cut short.
+    const MAX_SPAN: usize = 3;
 
-    pub fn visible(self: Picker) usize {
-        // Never taller than the window it sits in, leaving space for the box's
-        // own chrome and a margin top and bottom. Clamped in floating point:
-        // a window shorter than the chrome would otherwise go negative.
-        const fits = self.height / self.cell_h - @as(f32, CHROME_ROWS + 2);
-        const room: usize = if (fits < 1) 1 else @intFromFloat(fits);
-        return @max(@min(@min(self.count, MAX_ROWS), room), 1);
+    pub fn count(self: Picker) usize {
+        return self.rows.len;
     }
 
     pub fn boxW(self: Picker) f32 {
         return @as(f32, @floatFromInt(BOX_COLS)) * self.cell_w;
     }
 
+    /// Width of the name column in interface cells, gutter included.
+    ///
+    /// Fixed rather than fitted to the longest alias: the host column has to
+    /// start at the same x on every row, or one long name shunts every
+    /// address across and the list stops being readable down its edge.
+    pub fn nameCols(self: Picker) usize {
+        if (self.ui_cell_w <= 0) return 4;
+        const interior = (self.boxW() - self.cell_w * 2) / self.ui_cell_w;
+        if (interior < 8) return 4;
+        return @intFromFloat(interior / 2);
+    }
+
+    /// Lines entry `i` takes: its name wrapped inside the name column.
+    pub fn span(self: Picker, i: usize) usize {
+        if (i >= self.rows.len) return 1;
+        const alias = self.rows[i].alias;
+        const chars = std.unicode.utf8CountCodepoints(alias) catch alias.len;
+        const per_line = self.nameCols() -| 1;
+        if (per_line == 0 or chars <= per_line) return 1;
+        return @min(MAX_SPAN, (chars + per_line - 1) / per_line);
+    }
+
+    /// Lines the window leaves for the list.
+    pub fn lineBudget(self: Picker) usize {
+        // Never taller than the window it sits in, leaving space for the box's
+        // own chrome and a margin top and bottom. Clamped in floating point:
+        // a window shorter than the chrome would otherwise go negative.
+        const fits = self.height / self.cell_h - @as(f32, CHROME_ROWS + 2);
+        const room: usize = if (fits < 1) 1 else @intFromFloat(fits);
+        return @max(@min(MAX_ROWS, room), 1);
+    }
+
+    /// Lines the box devotes to the list. Independent of the selection, so
+    /// the box does not change size as it is scrolled.
+    pub fn listLines(self: Picker) usize {
+        var total: usize = 0;
+        for (0..self.rows.len) |i| total += self.span(i);
+        return @max(@min(total, self.lineBudget()), 1);
+    }
+
     pub fn boxH(self: Picker) f32 {
-        return @as(f32, @floatFromInt(self.visible() + CHROME_ROWS)) * self.cell_h;
+        return @as(f32, @floatFromInt(self.listLines() + CHROME_ROWS)) * self.cell_h;
     }
 
     pub fn boxX(self: Picker) f32 {
@@ -988,24 +1043,57 @@ pub const Picker = struct {
 
     /// Index of the first host on screen, scrolled so `selected` is visible.
     pub fn firstVisible(self: Picker, selected: usize) usize {
-        const v = self.visible();
-        return if (selected >= v) selected - v + 1 else 0;
+        if (self.rows.len == 0) return 0;
+        const limit = self.listLines();
+        var first = @min(selected, self.rows.len - 1);
+        var lines = self.span(first);
+        while (first > 0) {
+            const above = self.span(first - 1);
+            if (lines + above > limit) break;
+            lines += above;
+            first -= 1;
+        }
+        return first;
     }
 
-    /// Top edge of the i-th *visible* row.
-    pub fn rowY(self: Picker, i: usize) f32 {
-        return self.boxY() + self.cell_h * (FIRST_ROW + @as(f32, @floatFromInt(i)));
+    /// Entries that fit starting at `first`.
+    pub fn visibleFrom(self: Picker, first: usize) usize {
+        if (first >= self.rows.len) return 0;
+        const limit = self.listLines();
+        var lines: usize = 0;
+        var n: usize = 0;
+        while (first + n < self.rows.len) {
+            const s = self.span(first + n);
+            // The first entry shows whatever it costs; there is nowhere else
+            // to put it.
+            if (n > 0 and lines + s > limit) break;
+            lines += s;
+            n += 1;
+        }
+        return n;
+    }
+
+    /// Top edge of the i-th line of the list.
+    pub fn lineY(self: Picker, line: usize) f32 {
+        return self.boxY() + self.cell_h * (FIRST_ROW + @as(f32, @floatFromInt(line)));
     }
 
     /// The host index under a point, or null when the click missed the list.
     pub fn hitRow(self: Picker, x: f32, y: f32, selected: usize) ?usize {
-        if (self.count == 0) return null;
+        if (self.rows.len == 0) return null;
         if (x < self.boxX() or x >= self.boxX() + self.boxW()) return null;
-        const top = self.rowY(0);
+        const top = self.lineY(0);
         if (y < top) return null;
-        const i: usize = @intFromFloat((y - top) / self.cell_h);
-        if (i >= self.visible()) return null;
-        return self.firstVisible(selected) + i;
+        const line: usize = @intFromFloat((y - top) / self.cell_h);
+
+        const first = self.firstVisible(selected);
+        var at: usize = 0;
+        for (0..self.visibleFrom(first)) |i| {
+            const s = self.span(first + i);
+            if (line < at + s) return first + i;
+            at += s;
+        }
+        return null;
     }
 };
 
@@ -1070,6 +1158,17 @@ pub const HostRow = struct {
     alias: []const u8,
     detail: []const u8,
 };
+
+/// The byte offset `n` code points past `from`, clamped to the end. Used to
+/// cut a name into column-wide pieces without splitting a code point.
+fn utf8Advance(text: []const u8, from: usize, n: usize) usize {
+    var at = from;
+    var left = n;
+    while (left > 0 and at < text.len) : (left -= 1) {
+        at += std.unicode.utf8ByteSequenceLength(text[at]) catch 1;
+    }
+    return @min(at, text.len);
+}
 
 /// Per-column foreground overrides for one row, used by the shell-line
 /// highlighter. Columns outside `start..start + len` keep their own colour.
@@ -1365,13 +1464,25 @@ test "both buttons stay on screen when tabs overflow" {
     try testing.expectEqual(Hit.ssh_menu, bar.hit(bar.sshX() + 1, 8));
 }
 
+/// A picker of `count` short-named hosts, i.e. one line per entry.
 fn testPicker(count: usize) Picker {
-    return .{ .cell_w = 8, .cell_h = 16, .width = 800, .height = 600, .count = count };
+    const rows = struct {
+        var buf: [600]HostRow = undefined;
+    };
+    for (&rows.buf) |*r| r.* = .{ .alias = "host", .detail = "10.0.0.1" };
+    return .{
+        .cell_w = 8,
+        .cell_h = 16,
+        .ui_cell_w = 7,
+        .width = 800,
+        .height = 600,
+        .rows = rows.buf[0..count],
+    };
 }
 
 test "the picker box is centred and sized to its list" {
     const small = testPicker(3);
-    try testing.expectEqual(@as(usize, 3), small.visible());
+    try testing.expectEqual(@as(usize, 3), small.listLines());
     try testing.expectEqual(@as(f32, 16 * 7), small.boxH()); // 3 rows + chrome
     try testing.expectEqual((800 - small.boxW()) / 2, small.boxX());
 }
@@ -1380,28 +1491,31 @@ test "a long list uses the window rather than scrolling early" {
     // 600px of window at a 16px cell leaves room for well over the 14 rows
     // the box used to stop at.
     const big = testPicker(100);
-    try testing.expect(big.visible() > 14);
+    try testing.expect(big.listLines() > 14);
     try testing.expect(big.boxH() <= 600);
 }
 
 test "the picker never grows past the window it sits in" {
     for ([_]f32{ 200, 400, 600, 1200 }) |height| {
-        const p: Picker = .{ .cell_w = 8, .cell_h = 16, .width = 800, .height = height, .count = 500 };
-        try testing.expect(p.visible() >= 1);
+        var p = testPicker(500);
+        p.height = height;
+        try testing.expect(p.listLines() >= 1);
         try testing.expect(p.boxH() <= height);
         // ...and the rows it does show all land inside the box.
-        try testing.expect(p.rowY(p.visible() - 1) + p.cell_h <= p.boxY() + p.boxH());
+        try testing.expect(p.lineY(p.listLines() - 1) + p.cell_h <= p.boxY() + p.boxH());
     }
 }
 
 test "a tiny window still shows one row" {
-    const p: Picker = .{ .cell_w = 8, .cell_h = 16, .width = 200, .height = 40, .count = 50 };
-    try testing.expectEqual(@as(usize, 1), p.visible());
+    var p = testPicker(50);
+    p.width = 200;
+    p.height = 40;
+    try testing.expectEqual(@as(usize, 1), p.listLines());
 }
 
 test "the picker scrolls to keep the selection visible" {
-    const p: Picker = .{ .cell_w = 8, .cell_h = 16, .width = 800, .height = 600, .count = 100 };
-    const v = p.visible();
+    const p = testPicker(100);
+    const v = p.listLines();
     try testing.expectEqual(@as(usize, 0), p.firstVisible(0));
     try testing.expectEqual(@as(usize, 0), p.firstVisible(v - 1));
     try testing.expectEqual(@as(usize, 1), p.firstVisible(v));
@@ -1410,23 +1524,23 @@ test "the picker scrolls to keep the selection visible" {
 
 test "clicking a row in the picker names the right host" {
     const p = testPicker(5);
-    try testing.expectEqual(@as(usize, 0), p.hitRow(p.boxX() + 10, p.rowY(0) + 2, 0).?);
-    try testing.expectEqual(@as(usize, 2), p.hitRow(p.boxX() + 10, p.rowY(2) + 2, 0).?);
-    try testing.expectEqual(@as(usize, 4), p.hitRow(p.boxX() + 10, p.rowY(4) + 2, 0).?);
+    try testing.expectEqual(@as(usize, 0), p.hitRow(p.boxX() + 10, p.lineY(0) + 2, 0).?);
+    try testing.expectEqual(@as(usize, 2), p.hitRow(p.boxX() + 10, p.lineY(2) + 2, 0).?);
+    try testing.expectEqual(@as(usize, 4), p.hitRow(p.boxX() + 10, p.lineY(4) + 2, 0).?);
 }
 
 test "a click in a scrolled picker accounts for the offset" {
     const p = testPicker(100);
-    const selected = p.visible() + 4; // scrolled down by 5
-    try testing.expectEqual(@as(usize, 5), p.hitRow(p.boxX() + 10, p.rowY(0) + 2, selected).?);
+    const selected = p.listLines() + 4; // scrolled down by 5
+    try testing.expectEqual(@as(usize, 5), p.hitRow(p.boxX() + 10, p.lineY(0) + 2, selected).?);
 }
 
 test "clicks outside the picker list hit nothing" {
     const p = testPicker(5);
-    try testing.expect(p.hitRow(p.boxX() - 1, p.rowY(0) + 2, 0) == null);
-    try testing.expect(p.hitRow(p.boxX() + p.boxW(), p.rowY(0) + 2, 0) == null);
+    try testing.expect(p.hitRow(p.boxX() - 1, p.lineY(0) + 2, 0) == null);
+    try testing.expect(p.hitRow(p.boxX() + p.boxW(), p.lineY(0) + 2, 0) == null);
     try testing.expect(p.hitRow(p.boxX() + 10, p.boxY(), 0) == null); // title row
-    try testing.expect(p.hitRow(p.boxX() + 10, p.rowY(5) + 2, 0) == null); // past the end
+    try testing.expect(p.hitRow(p.boxX() + 10, p.lineY(5) + 2, 0) == null); // past the end
     try testing.expect(testPicker(0).hitRow(400, 300, 0) == null);
 }
 
@@ -1441,6 +1555,77 @@ test "every point in the picker resolves without panicking" {
             }
         }
     }
+}
+
+test "the host column starts at the same place whatever the names are" {
+    // The reported bug: one long alias used to push its address right, and
+    // the list lost the straight edge that makes it scannable.
+    var rows = [_]HostRow{
+        .{ .alias = "a", .detail = "10.0.0.1" },
+        .{ .alias = "a-very-long-alias-indeed", .detail = "10.0.0.2" },
+    };
+    const p: Picker = .{
+        .cell_w = 8,
+        .cell_h = 16,
+        .ui_cell_w = 7,
+        .width = 800,
+        .height = 600,
+        .rows = &rows,
+    };
+    // nameCols is a property of the box, not of what is in it.
+    try testing.expectEqual(p.nameCols(), p.nameCols());
+    try testing.expect(p.nameCols() > 4);
+}
+
+test "a name too long for its column wraps instead of overflowing" {
+    var rows = [_]HostRow{
+        .{ .alias = "short", .detail = "10.0.0.1" },
+        .{ .alias = "x" ** 40, .detail = "10.0.0.2" },
+        .{ .alias = "y" ** 400, .detail = "10.0.0.3" },
+    };
+    const p: Picker = .{
+        .cell_w = 8,
+        .cell_h = 16,
+        .ui_cell_w = 7,
+        .width = 800,
+        .height = 600,
+        .rows = &rows,
+    };
+    try testing.expectEqual(@as(usize, 1), p.span(0));
+    try testing.expectEqual(@as(usize, 2), p.span(1));
+    // However long the name, an entry is capped so it cannot fill the box.
+    try testing.expectEqual(Picker.MAX_SPAN, p.span(2));
+    try testing.expectEqual(@as(usize, 1 + 2 + 3), p.listLines());
+}
+
+test "clicks land on the right host when entries are different heights" {
+    var rows = [_]HostRow{
+        .{ .alias = "one", .detail = "" },
+        .{ .alias = "t" ** 40, .detail = "" }, // two lines
+        .{ .alias = "three", .detail = "" },
+    };
+    const p: Picker = .{
+        .cell_w = 8,
+        .cell_h = 16,
+        .ui_cell_w = 7,
+        .width = 800,
+        .height = 600,
+        .rows = &rows,
+    };
+    const x = p.boxX() + 10;
+    try testing.expectEqual(@as(usize, 0), p.hitRow(x, p.lineY(0) + 2, 0).?);
+    try testing.expectEqual(@as(usize, 1), p.hitRow(x, p.lineY(1) + 2, 0).?);
+    try testing.expectEqual(@as(usize, 1), p.hitRow(x, p.lineY(2) + 2, 0).?); // its second line
+    try testing.expectEqual(@as(usize, 2), p.hitRow(x, p.lineY(3) + 2, 0).?);
+    try testing.expect(p.hitRow(x, p.lineY(4) + 2, 0) == null);
+}
+
+test "a name is cut on a code point boundary, never inside one" {
+    const text = "\u{0430}\u{0431}\u{0432}\u{0433}"; // four two-byte code points
+    try testing.expectEqual(@as(usize, 0), utf8Advance(text, 0, 0));
+    try testing.expectEqual(@as(usize, 4), utf8Advance(text, 0, 2));
+    try testing.expectEqual(@as(usize, 8), utf8Advance(text, 0, 9)); // clamped
+    try testing.expectEqual(@as(usize, 6), utf8Advance(text, 2, 2));
 }
 
 test "clicks outside the bar hit nothing" {

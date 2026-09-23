@@ -42,7 +42,11 @@ pub const Config = struct {
         self.arena.deinit();
     }
 
-    /// Hosts that can actually be connected to, i.e. excluding patterns.
+    /// Hosts that can actually be connected to, i.e. excluding patterns,
+    /// in alphabetical order.
+    ///
+    /// Sorted here rather than in the picker so that the index the picker
+    /// shows and the index it connects to are the same one.
     pub fn connectable(self: *const Config, out: []Host) []Host {
         var n: usize = 0;
         for (self.hosts) |h| {
@@ -50,7 +54,19 @@ pub const Config = struct {
             out[n] = h;
             n += 1;
         }
+        std.mem.sort(Host, out[0..n], {}, aliasBefore);
         return out[0..n];
+    }
+
+    /// Case-insensitive, so `Web` and `web` sort together rather than the
+    /// capitals coming first; ties break on the exact bytes so the order is
+    /// the same on every run.
+    fn aliasBefore(_: void, a: Host, b: Host) bool {
+        return switch (std.ascii.orderIgnoreCase(a.alias, b.alias)) {
+            .lt => true,
+            .gt => false,
+            .eq => std.mem.order(u8, a.alias, b.alias) == .lt,
+        };
     }
 };
 
@@ -379,6 +395,48 @@ test "connectable filters out patterns" {
     try testing.expectEqual(@as(usize, 2), usable.len);
     try testing.expectEqualStrings("one", usable[0].alias);
     try testing.expectEqualStrings("two", usable[1].alias);
+}
+
+test "connectable sorts the hosts alphabetically" {
+    // The file's order is whatever the user wrote; the picker wants a list
+    // that can be scanned.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    const hosts = try parseForTest(arena.allocator(),
+        \\Host zeta
+        \\Host Alpha
+        \\Host beta
+        \\Host alpha
+    );
+    var cfg = Config{ .arena = arena, .hosts = hosts };
+    defer cfg.deinit();
+
+    var buf: [8]Host = undefined;
+    const usable = cfg.connectable(&buf);
+    try testing.expectEqual(@as(usize, 4), usable.len);
+    // Case-insensitive, so the capitals do not all come first; the tie
+    // between `Alpha` and `alpha` breaks the same way every run.
+    try testing.expectEqualStrings("Alpha", usable[0].alias);
+    try testing.expectEqualStrings("alpha", usable[1].alias);
+    try testing.expectEqualStrings("beta", usable[2].alias);
+    try testing.expectEqualStrings("zeta", usable[3].alias);
+}
+
+test "sorting survives more hosts than the caller's buffer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    const hosts = try parseForTest(arena.allocator(),
+        \\Host d
+        \\Host c
+        \\Host b
+        \\Host a
+    );
+    var cfg = Config{ .arena = arena, .hosts = hosts };
+    defer cfg.deinit();
+
+    var buf: [2]Host = undefined;
+    const usable = cfg.connectable(&buf);
+    try testing.expectEqual(@as(usize, 2), usable.len);
+    try testing.expectEqualStrings("c", usable[0].alias);
+    try testing.expectEqualStrings("d", usable[1].alias);
 }
 
 test "command yields a null-terminated alias" {

@@ -463,7 +463,7 @@ pub const App = struct {
 
         if (self.picker) |p| {
             const layout = self.renderer.picker(
-                p.count,
+                self.pickerRows(),
                 @floatFromInt(self.win_w),
                 @floatFromInt(self.win_h),
             );
