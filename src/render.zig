@@ -13,8 +13,6 @@ const highlight = @import("highlight");
 const icons = @import("icons");
 const tabs_mod = @import("tabs");
 
-/// The title strip above the tabs, in terminal cells.
-pub const TITLE_BAR_CELLS: u32 = 2;
 pub const TAB_BAR_CELLS: u32 = 2;
 /// Preferred width of a tab, in character cells.
 pub const TAB_WIDTH_CELLS: u32 = 18;
@@ -563,13 +561,8 @@ pub const Renderer = struct {
 
     // -- tab bar -----------------------------------------------------------
 
-    pub fn drawTabBar(
-        self: *Renderer,
-        tabs: *tabs_mod.Tabs,
-        th: *const theme.Theme,
-        width: f32,
-        top: f32,
-    ) void {
+    pub fn drawTabBar(self: *Renderer, tabs: *tabs_mod.Tabs, th: *const theme.Theme, width: f32) void {
+        const top: f32 = 0;
         const cw: f32 = @floatFromInt(self.cellW());
         const bar = self.tabBar(tabs.count, width);
         const bar_h = bar.height();
@@ -653,7 +646,7 @@ pub const Renderer = struct {
         const ssh_x = bar.sshX();
         const ssh_w = bar.sshWidth();
         self.fill(ssh_x, top, ssh_w, bar_h, th.tab_bar_bg);
-        self.drawIcon(.remote, ssh_x, 0, ssh_w - cw * 0.8, bar_h, th.ansi[4], SSH_ICON_SCALE);
+        self.drawIcon(.remote, ssh_x, top, ssh_w - cw * 0.8, bar_h, th.ansi[4], SSH_ICON_SCALE);
         self.drawIcon(
             .chevron_down,
             ssh_x + ssh_w - cw,
@@ -711,61 +704,6 @@ pub const Renderer = struct {
         if (fitted.suffix.len > 0) {
             at += self.uiCellW();
             _ = self.drawUiText(fitted.suffix, at, y, dim);
-        }
-    }
-
-    /// Height of ztabb's own title strip, in pixels.
-    pub fn titleBarH(self: *const Renderer) f32 {
-        return @floatFromInt(self.cellH() * TITLE_BAR_CELLS);
-    }
-
-    /// Draws the title strip: the window controls, a terminal mark, then the
-    /// active tab's name over the application's own, dimmed.
-    ///
-    /// The system title bar cannot carry an icon, two colours and a chosen
-    /// face, so the window is borderless and this is drawn instead.
-    pub fn drawTitleBar(
-        self: *Renderer,
-        name: []const u8,
-        kind_icon: icons.Icon,
-        th: *const theme.Theme,
-        width: f32,
-    ) void {
-        const h = self.titleBarH();
-        const cw: f32 = @floatFromInt(self.cellW());
-        self.fill(0, 0, width, h, th.tab_bar_bg);
-        self.fill(0, h - self.hairline(), width, self.hairline(), th.tab_border);
-
-        // Close, minimise, zoom -- in the colours the platform uses for them.
-        const light_colours = [_]u32{ 0xFF5F57, 0xFEBC2E, 0x28C840 };
-        for (TitleBar.lights(h), light_colours) |light, colour| {
-            self.fillCircle(light.cx, light.cy, light.r, colour);
-        }
-
-        // The title is centred on the strip, not on the window, so the window
-        // controls never crowd it.
-        const buf: [tabs_mod.MAX_LABEL * 2 + 16]u8 = undefined;
-        const suffix = " / ztabb";
-        const shown = if (name.len + suffix.len <= buf.len) name else name[0..0];
-        const total_cells = cellLen(shown) + cellLen(suffix);
-        const icon_w = self.iconDrawSize();
-        const text_w = @as(f32, @floatFromInt(total_cells)) * self.uiCellW();
-        var at = @max(TitleBar.controlsWidth(h) + cw, (width - text_w - icon_w - cw / 2) / 2);
-
-        self.drawIcon(kind_icon, at, 0, icon_w, h, th.ansi[4], 0.9);
-        at += icon_w + cw / 2;
-
-        const text_y = (h - self.uiCellH()) / 2;
-        at += self.drawUiText(shown, at, text_y, th.tab_active_fg);
-        _ = self.drawUiText(suffix, at, text_y, th.tab_inactive_fg);
-    }
-
-    /// A filled circle, for the window controls.
-    fn fillCircle(self: *Renderer, cx: f32, cy: f32, r: f32, color: u32) void {
-        var dy: f32 = -r;
-        while (dy <= r) : (dy += 1) {
-            const dx = @sqrt(@max(r * r - dy * dy, 0));
-            self.fill(cx - dx, cy + dy, dx * 2, 1, color);
         }
     }
 
@@ -894,61 +832,6 @@ pub const Picker = struct {
         const i: usize = @intFromFloat((y - top) / self.cell_h);
         if (i >= self.visible()) return null;
         return self.firstVisible(selected) + i;
-    }
-};
-
-/// Layout of the title strip: the window controls on the left, everything
-/// else centred. Pure geometry, so the hit testing can be checked without a
-/// window.
-pub const TitleBar = struct {
-    pub const Light = struct { cx: f32, cy: f32, r: f32 };
-
-    /// macOS puts its controls at a fixed inset regardless of the title height.
-    fn radius(h: f32) f32 {
-        return @max(4, h * 0.11);
-    }
-
-    fn spacing(h: f32) f32 {
-        return radius(h) * 3.2;
-    }
-
-    fn firstX(h: f32) f32 {
-        return radius(h) * 3.0;
-    }
-
-    pub fn lights(h: f32) [3]Light {
-        const r = radius(h);
-        var out: [3]Light = undefined;
-        for (&out, 0..) |*light, i| {
-            light.* = .{
-                .cx = firstX(h) + @as(f32, @floatFromInt(i)) * spacing(h),
-                .cy = h / 2,
-                .r = r,
-            };
-        }
-        return out;
-    }
-
-    /// Where the controls end, so the title can start clear of them.
-    pub fn controlsWidth(h: f32) f32 {
-        return firstX(h) + 2 * spacing(h) + radius(h);
-    }
-
-    /// Which control a click landed on, if any.
-    pub const Control = enum { close, minimize, zoom };
-
-    pub fn hit(h: f32, x: f32, y: f32) ?Control {
-        if (y < 0 or y >= h) return null;
-        for (lights(h), 0..) |light, i| {
-            const dx = x - light.cx;
-            const dy = y - light.cy;
-            // A generous target: the dots are small, and a near miss should
-            // still land rather than drag the window.
-            if (dx * dx + dy * dy <= (light.r * 1.8) * (light.r * 1.8)) {
-                return @enumFromInt(i);
-            }
-        }
-        return null;
     }
 };
 
@@ -1191,39 +1074,6 @@ test "narrow tabs drop the close button rather than overlap the label" {
     try testing.expectEqual(@as(usize, 0), bar.hit(4, 8).tab);
 }
 
-test "the window controls are three dots in a row, clear of the title" {
-    const h: f32 = 56;
-    const lights = TitleBar.lights(h);
-    try testing.expectEqual(@as(usize, 3), lights.len);
-    for (lights) |light| try testing.expectEqual(h / 2, light.cy);
-    try testing.expect(lights[1].cx > lights[0].cx);
-    try testing.expect(lights[2].cx > lights[1].cx);
-    // The title must start past all three.
-    try testing.expect(TitleBar.controlsWidth(h) > lights[2].cx);
-}
-
-test "each window control answers its own click" {
-    const h: f32 = 56;
-    const lights = TitleBar.lights(h);
-    try testing.expectEqual(TitleBar.Control.close, TitleBar.hit(h, lights[0].cx, lights[0].cy).?);
-    try testing.expectEqual(TitleBar.Control.minimize, TitleBar.hit(h, lights[1].cx, lights[1].cy).?);
-    try testing.expectEqual(TitleBar.Control.zoom, TitleBar.hit(h, lights[2].cx, lights[2].cy).?);
-}
-
-test "clicks away from the controls drag the window instead" {
-    const h: f32 = 56;
-    try testing.expect(TitleBar.hit(h, 400, h / 2) == null);
-    try testing.expect(TitleBar.hit(h, 0, 0) == null);
-    try testing.expect(TitleBar.hit(h, TitleBar.lights(h)[0].cx, h + 1) == null);
-    try testing.expect(TitleBar.hit(h, TitleBar.lights(h)[0].cx, -1) == null);
-}
-
-test "the controls scale with the title height" {
-    // The strip follows the font size, so the dots have to as well.
-    try testing.expect(TitleBar.controlsWidth(80) > TitleBar.controlsWidth(40));
-    try testing.expect(TitleBar.lights(80)[0].r > TitleBar.lights(40)[0].r);
-}
-
 test "clicking the plus button asks for a new tab" {
     const bar = testBar(3, 800);
     try testing.expectEqual(Hit.new_tab, bar.hit(bar.plusX() + 4, 8));
@@ -1235,6 +1085,37 @@ test "the SSH button is the larger of the two, being the connection entry point"
     // Its icon is drawn a size up from the rest of the set, and the button has
     // to be wide enough to hold it.
     try testing.expect(SSH_ICON_SCALE > 1.0);
+}
+
+test "the buttons sit side by side, in order, without overlapping" {
+    // The globe is drawn from the same geometry the hit test reads, so the two
+    // cannot drift apart: it was drawn at the window top while its click area
+    // stayed on the tab bar, which left it looking misplaced and dead.
+    for ([_]usize{ 0, 1, 5, 40 }) |count| {
+        const bar = testBar(count, 800);
+        try testing.expectEqual(bar.plusX() + bar.plusWidth(), bar.sshX());
+        try testing.expect(bar.sshX() + bar.sshWidth() <= 800);
+
+        // Every point of each button answers as that button.
+        var x = bar.plusX();
+        while (x < bar.plusX() + bar.plusWidth()) : (x += 1) {
+            try testing.expectEqual(Hit.new_tab, bar.hit(x, bar.height() / 2));
+        }
+        x = bar.sshX();
+        while (x < bar.sshX() + bar.sshWidth()) : (x += 1) {
+            try testing.expectEqual(Hit.ssh_menu, bar.hit(x, bar.height() / 2));
+        }
+    }
+}
+
+test "the buttons answer across the full height of the bar" {
+    const bar = testBar(3, 800);
+    var y: f32 = 0;
+    while (y < bar.height()) : (y += 1) {
+        try testing.expectEqual(Hit.ssh_menu, bar.hit(bar.sshX() + 1, y));
+    }
+    // ...and not below it, where the terminal starts.
+    try testing.expectEqual(Hit.none, bar.hit(bar.sshX() + 1, bar.height()));
 }
 
 test "the SSH caret sits beside the plus and opens the host list" {

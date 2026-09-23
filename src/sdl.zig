@@ -13,7 +13,6 @@ pub const Surface = opaque {};
 
 pub const INIT_VIDEO: u32 = 0x20;
 
-pub const WINDOW_BORDERLESS: u64 = 0x10;
 pub const WINDOW_RESIZABLE: u64 = 0x20;
 pub const WINDOW_HIGH_PIXEL_DENSITY: u64 = 0x2000;
 
@@ -101,20 +100,6 @@ pub const KMOD_CTRL: u16 = KMOD_LCTRL | KMOD_RCTRL;
 pub const KMOD_SHIFT: u16 = KMOD_LSHIFT | KMOD_RSHIFT;
 pub const KMOD_ALT: u16 = KMOD_LALT | KMOD_RALT;
 pub const KMOD_GUI: u16 = KMOD_LGUI | KMOD_RGUI;
-
-pub const HITTEST_NORMAL: c_int = 0;
-pub const HITTEST_DRAGGABLE: c_int = 1;
-pub const HITTEST_RESIZE_TOPLEFT: c_int = 2;
-pub const HITTEST_RESIZE_TOP: c_int = 3;
-pub const HITTEST_RESIZE_TOPRIGHT: c_int = 4;
-pub const HITTEST_RESIZE_RIGHT: c_int = 5;
-pub const HITTEST_RESIZE_BOTTOMRIGHT: c_int = 6;
-pub const HITTEST_RESIZE_BOTTOM: c_int = 7;
-pub const HITTEST_RESIZE_BOTTOMLEFT: c_int = 8;
-pub const HITTEST_RESIZE_LEFT: c_int = 9;
-
-pub const Point = extern struct { x: c_int, y: c_int };
-pub const HitTest = *const fn (win: ?*Window, area: *const Point, data: ?*anyopaque) callconv(.c) c_int;
 
 pub const BUTTON_LEFT: u8 = 1;
 pub const BUTTON_MIDDLE: u8 = 2;
@@ -247,11 +232,6 @@ extern "c" fn SDL_SetWindowTitle(window: ?*Window, title: [*:0]const u8) bool;
 extern "c" fn SDL_CreateSurfaceFrom(w: c_int, h: c_int, format: u32, pixels: *anyopaque, pitch: c_int) ?*Surface;
 extern "c" fn SDL_DestroySurface(surface: ?*Surface) void;
 extern "c" fn SDL_SetWindowIcon(window: ?*Window, icon: ?*Surface) bool;
-extern "c" fn SDL_SetWindowHitTest(window: ?*Window, callback: ?HitTest, data: ?*anyopaque) bool;
-extern "c" fn SDL_MinimizeWindow(window: ?*Window) bool;
-extern "c" fn SDL_MaximizeWindow(window: ?*Window) bool;
-extern "c" fn SDL_RestoreWindow(window: ?*Window) bool;
-extern "c" fn SDL_GetWindowFlags(window: ?*Window) u64;
 extern "c" fn SDL_GetClipboardText() [*:0]u8;
 extern "c" fn SDL_SetClipboardText(text: [*:0]const u8) bool;
 extern "c" fn SDL_free(mem: ?*anyopaque) void;
@@ -279,32 +259,11 @@ pub fn quit() void {
     SDL_Quit();
 }
 
-/// `borderless` drops the system frame so the application can draw its own
-/// title bar; dragging and resizing then come from a hit test.
-pub fn createWindow(title: [*:0]const u8, w: i32, h: i32, borderless: bool) Error!*Window {
-    var flags = WINDOW_RESIZABLE | WINDOW_HIGH_PIXEL_DENSITY;
-    if (borderless) flags |= WINDOW_BORDERLESS;
+/// The window keeps the system frame: its title bar, its buttons and its
+/// behaviour belong to the platform, not to ztabb.
+pub fn createWindow(title: [*:0]const u8, w: i32, h: i32) Error!*Window {
+    const flags = WINDOW_RESIZABLE | WINDOW_HIGH_PIXEL_DENSITY;
     return SDL_CreateWindow(title, w, h, flags) orelse error.WindowCreationFailed;
-}
-
-/// Tells the window manager which parts of a borderless window drag or resize
-/// it. Coordinates reaching the callback are in window points.
-pub fn setWindowHitTest(win: ?*Window, callback: ?HitTest) void {
-    _ = SDL_SetWindowHitTest(win, callback, null);
-}
-
-pub fn minimizeWindow(win: ?*Window) void {
-    _ = SDL_MinimizeWindow(win);
-}
-
-/// Toggles between maximized and restored.
-pub fn toggleMaximize(win: ?*Window) void {
-    const MAXIMIZED: u64 = 0x80;
-    if (SDL_GetWindowFlags(win) & MAXIMIZED != 0) {
-        _ = SDL_RestoreWindow(win);
-    } else {
-        _ = SDL_MaximizeWindow(win);
-    }
 }
 
 pub fn destroyWindow(win: ?*Window) void {
