@@ -123,12 +123,46 @@ pub fn glyph(cp: u21, size: Size) []const u8 {
 }
 
 /// True when the glyph has no coverage at all — used to skip drawing entirely.
+///
+/// Scans the glyph, so it is not for per-cell use in a render loop: build a
+/// `BlankSet` once per atlas instead.
 pub fn isBlank(cp: u21, size: Size) bool {
     for (glyph(cp, size)) |v| {
         if (v != 0) return false;
     }
     return true;
 }
+
+/// One bit per glyph, marking those with nothing to draw.
+///
+/// The renderer asks this for every cell on screen; scanning the glyph each
+/// time costs a few hundred byte reads per cell, which on a full window is
+/// millions per frame for an answer that never changes.
+pub const BlankSet = struct {
+    bits: [(glyph_count + 63) / 64]u64 = @splat(0),
+
+    pub fn build(size: Size) BlankSet {
+        var set = BlankSet{};
+        for (0..glyph_count) |i| {
+            const per_glyph = size.pixels();
+            const px = blob[size.offset + i * per_glyph ..][0..per_glyph];
+            var blank = true;
+            for (px) |v| {
+                if (v != 0) {
+                    blank = false;
+                    break;
+                }
+            }
+            if (blank) set.bits[i / 64] |= @as(u64, 1) << @intCast(i % 64);
+        }
+        return set;
+    }
+
+    pub fn has(self: *const BlankSet, cp: u21) bool {
+        const i = resolveIndex(cp);
+        return self.bits[i / 64] & (@as(u64, 1) << @intCast(i % 64)) != 0;
+    }
+};
 
 // -- atlas -----------------------------------------------------------------
 
@@ -364,6 +398,21 @@ test "every glyph slice is the size the metrics promise" {
         try testing.expectEqual(size.pixels(), glyph('A', size).len);
         try testing.expectEqual(size.pixels(), glyph(0x2718, size).len);
     }
+}
+
+test "the blank set agrees with a direct scan" {
+    for (0..section_count) |i| {
+        const size = sectionAt(i);
+        const set = BlankSet.build(size);
+        // Spot-check across the whole range rather than all 1067 at every size.
+        for ([_]u21{ ' ', 'A', 'g', 'Ж', 0x2588, 0x2500, 0xE0B0, 0xE0A5, 0x4E00 }) |cp| {
+            try testing.expectEqual(isBlank(cp, size), set.has(cp));
+        }
+    }
+}
+
+test "the blank set is small enough to keep beside each atlas" {
+    try testing.expect(@sizeOf(BlankSet) <= 256);
 }
 
 test "space is blank and letters are not, in every section" {

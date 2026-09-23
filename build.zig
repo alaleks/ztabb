@@ -21,6 +21,9 @@ pub fn build(b: *std.Build) void {
     const appicon_mod = mod(b, "src/appicon.zig", target, optimize);
     const png_mod = mod(b, "src/png.zig", target, optimize);
     const pty_mod = mod(b, "src/pty.zig", target, optimize);
+    // openpty and login_tty live in libutil on Linux and the BSDs; on macOS
+    // they are part of libc, which is already linked.
+    if (target.result.os.tag == .linux) pty_mod.linkSystemLibrary("util", .{});
     const ssh_mod = mod(b, "src/ssh.zig", target, optimize);
 
     const sdl_mod = mod(b, "src/sdl.zig", target, optimize);

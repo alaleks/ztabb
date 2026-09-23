@@ -563,11 +563,16 @@ pub const App = struct {
         sdl.renderPresent(self.renderer.r);
     }
 
+    /// The title bar carries the tab's own name and nothing else.
+    ///
+    /// Prefixing it with the application name produced "ztabb — dir" at the
+    /// top of the window, which reads as the app talking about itself. The
+    /// name of the program is already on the Dock icon and in the menu bar.
     fn updateWindowTitle(self: *App, tab: *tabs_mod.Tab) void {
         var buf: [tabs_mod.MAX_LABEL + 16:0]u8 = undefined;
         var name_buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
         const name = tab.displayName(&name_buf);
-        const written = std.fmt.bufPrintZ(&buf, "ztabb \u{2014} {s}", .{name}) catch return;
+        const written = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return;
         if (std.mem.eql(u8, written, std.mem.sliceTo(&self.title_buf, 0))) return;
         @memcpy(self.title_buf[0..written.len], written);
         self.title_buf[written.len] = 0;

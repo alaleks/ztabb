@@ -45,7 +45,6 @@ const libc = struct {
     extern "c" fn usleep(usec: c_uint) c_int;
     extern "c" fn poll(fds: [*]PollFd, nfds: c_uint, timeout: c_int) c_int;
     extern "c" fn _exit(code: c_int) noreturn;
-    extern "c" fn __error() *c_int;
     extern "c" var environ: [*:null]?[*:0]const u8;
 };
 
@@ -56,17 +55,18 @@ const PollFd = extern struct {
 };
 const POLLIN: c_short = 0x0001;
 
-const EAGAIN: c_int = 35;
-const EINTR: c_int = 4;
-const F_GETFL: c_int = 3;
-const F_SETFL: c_int = 4;
-const O_NONBLOCK: c_int = 0x0004;
-const SIGHUP: c_int = 1;
+// Taken from the platform's own definitions rather than written out: the BSD
+// and Linux values differ (EAGAIN is 35 on one and 11 on the other, O_NONBLOCK
+// 0x4 against 0x800), and hardcoding either set silently misreads the other.
+const F_GETFL: c_int = posix.F.GETFL;
+const F_SETFL: c_int = posix.F.SETFL;
+const O_NONBLOCK: c_int = @bitCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
+const SIGHUP: c_int = @intFromEnum(posix.SIG.HUP);
 const WNOHANG: c_int = 1;
 const F_OK: c_int = 0;
 
-fn errno() c_int {
-    return libc.__error().*;
+fn errno() posix.E {
+    return @enumFromInt(std.c._errno().*);
 }
 
 pub const SpawnError = error{
@@ -161,8 +161,8 @@ pub const Pty = struct {
             const n = libc.write(self.master, buf[off..].ptr, buf.len - off);
             if (n < 0) {
                 const e = errno();
-                if (e == EINTR) continue;
-                if (e == EAGAIN) {
+                if (e == .INTR) continue;
+                if (e == .AGAIN) {
                     stalls += 1;
                     if (stalls > 16) return;
                     _ = libc.usleep(1000);

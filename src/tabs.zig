@@ -71,7 +71,8 @@ pub const Tab = struct {
         return .{ .prefix = path[0 .. path.len - leaf.len], .name = leaf };
     }
 
-    /// The label as one string, for the window title.
+    /// The label as one string, for the window title, which has no colours to
+    /// separate the path from the directory.
     pub fn displayName(self: *const Tab, buf: []u8) []const u8 {
         const parts = self.labelParts();
         var n: usize = 0;
