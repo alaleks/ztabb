@@ -103,12 +103,21 @@ they always do.
 | `Cmd+Y`                           | Toggle light / dark                  |
 | `Cmd+L`                           | Toggle command colouring             |
 | `Cmd+=` / `Cmd+-` / `Cmd+0`       | Font size: up / down / back to 13 pt |
-| `Cmd+C` / `Cmd+V`                 | Copy selection or line / paste       |
+| `Cmd+C` / `Cmd+V`                 | Copy selection / paste               |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll history                       |
 | Mouse wheel                       | Scroll (see below)                   |
 
 No binding uses Shift as an extra modifier: under the Ctrl+Shift form it is
 already spoken for, and such a combination would be unreachable there.
+
+**Ctrl+C** copies when something is selected and interrupts when nothing is —
+in a terminal Ctrl+C is the interrupt and cannot simply become copy, but with a
+selection on screen that is plainly what was meant. **Ctrl+V** stays the shell's
+`quoted-insert`; paste is `Cmd+V` or `Ctrl+Shift+V`.
+
+Copying with nothing selected says so rather than copying something else. It
+used to fall back to the cursor's line, which meant the clipboard quietly
+filled with the prompt and the next paste inserted that.
 
 The wheel does whatever suits what is running. With a shell at a prompt it
 moves through the history. On the alternate screen — `nano`, `vim`, `less` —

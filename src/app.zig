@@ -325,6 +325,21 @@ pub const App = struct {
         }
 
         const tab = self.tabs.active() orelse return;
+
+        // Ctrl+C copies when something is selected and interrupts when it is
+        // not. In a terminal Ctrl+C is the interrupt and cannot simply become
+        // copy, but with a selection on screen that is plainly what was meant
+        // -- and with none, nothing is taken away.
+        if (mods & sdl.KMOD_CTRL != 0 and !isAppMod(mods) and key == sdl.SDLK_C) {
+            if (self.selection) |sel| {
+                if (!sel.isEmpty()) {
+                    self.copy();
+                    self.clearSelection();
+                    return;
+                }
+            }
+        }
+
         tab.active().terminal.scrollToBottom();
         self.clearSelection();
 
@@ -717,36 +732,28 @@ pub const App = struct {
         if (bracketed) tab.active().pty.write("\x1b[201~") catch {};
     }
 
-    /// Copies the selection, or the cursor's line when there is none.
+    /// Copies the selection.
+    ///
+    /// With nothing selected it says so rather than copying something else.
+    /// Falling back to the cursor's line looked helpful and was not: the
+    /// clipboard quietly filled with the prompt, and the next paste inserted
+    /// that instead of whatever the user thought they had copied.
     fn copy(self: *App) void {
         const tab = self.tabs.active() orelse return;
-        if (self.selection) |sel| {
-            if (!sel.isEmpty()) {
-                var buf: [64 * 1024:0]u8 = undefined;
-                const text = term.selectedText(&tab.active().terminal, sel, buf[0 .. buf.len - 1]);
-                buf[text.len] = 0;
-                sdl.setClipboardText(@ptrCast(&buf));
-                self.showToast("copied {d} chars", .{text.len});
-                return;
-            }
+        const sel = self.selection orelse {
+            self.showToast("nothing selected", .{});
+            return;
+        };
+        if (sel.isEmpty()) {
+            self.showToast("nothing selected", .{});
+            return;
         }
-        self.copyCursorLine(tab);
-    }
 
-    fn copyCursorLine(self: *App, tab: *tabs_mod.Tab) void {
-        var buf: [1024:0]u8 = undefined;
-        var n: usize = 0;
-        const t = &tab.active().terminal;
-        for (0..t.cols) |c| {
-            const cp = t.cellAt(t.cursor_row, @intCast(c)).ch;
-            const len = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
-            if (n + len >= buf.len) break;
-            n += std.unicode.utf8Encode(cp, buf[n..]) catch break;
-        }
-        while (n > 0 and buf[n - 1] == ' ') n -= 1;
-        buf[n] = 0;
+        var buf: [64 * 1024:0]u8 = undefined;
+        const text = term.selectedText(&tab.active().terminal, sel, buf[0 .. buf.len - 1]);
+        buf[text.len] = 0;
         sdl.setClipboardText(@ptrCast(&buf));
-        self.showToast("copied {d} chars", .{n});
+        self.showToast("copied {d} chars", .{text.len});
     }
 
     // -- ssh picker --------------------------------------------------------

@@ -224,6 +224,7 @@ pub const Event = extern union {
     _pad: [128]u8,
 };
 
+extern "c" fn SDL_SetHint(name: [*:0]const u8, value: [*:0]const u8) bool;
 extern "c" fn SDL_Init(flags: u32) bool;
 extern "c" fn SDL_Quit() void;
 extern "c" fn SDL_GetError() [*:0]const u8;
@@ -276,6 +277,10 @@ pub fn lastError() []const u8 {
 }
 
 pub fn init() Error!void {
+    // Control-click is how macOS has always asked for a context menu, but SDL
+    // leaves it as a plain left click unless told otherwise -- so on a machine
+    // whose trackpad has no secondary click, the right button is unreachable.
+    _ = SDL_SetHint("SDL_MAC_CTRL_CLICK_EMULATE_RIGHT_CLICK", "1");
     if (!SDL_Init(INIT_VIDEO)) return error.SdlInitFailed;
 }
 
