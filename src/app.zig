@@ -250,8 +250,12 @@ pub const App = struct {
     ///
     /// Resizing a window produces two events, and the first of them carries a
     /// backbuffer that has not caught up yet. Returning early when nothing
-    /// moved keeps that one from re-laying the grid, signalling the shell and
-    /// drawing a frame for a size the window does not have.
+    /// moved keeps that one from re-laying the grid and raising a SIGWINCH for
+    /// a size the shell already has -- which it answers by repainting its
+    /// prompt, once for every step of a drag.
+    ///
+    /// It says nothing about whether to draw. The caller decides that, and
+    /// during a resize the answer is always yes.
     fn applyGeometry(self: *App) void {
         const was_w = self.win_w;
         const was_h = self.win_h;
@@ -265,7 +269,6 @@ pub const App = struct {
             self.cols == was_cols and self.rows == was_rows and
             self.density == was_density) return;
 
-        std.debug.print("RELAYOUT px={d}x{d} density={d:.2} grid={d}x{d}\n", .{ self.win_w, self.win_h, self.density, self.cols, self.rows });
         self.tabs.resizeAll(self.cols, self.rows);
         self.ui_dirty = true;
     }
@@ -297,10 +300,15 @@ pub const App = struct {
                 if (self.in_window_event) return true;
                 self.in_window_event = true;
                 defer self.in_window_event = false;
-                // An exposed window has to be repainted whether or not its
-                // geometry moved; a resize only if it did.
-                if (event.type_ == sdl.EVENT_WINDOW_EXPOSED) self.ui_dirty = true;
-                std.debug.print("WATCH ev=0x{x}\n", .{event.type_});
+                // Every one of these means the frame on screen no longer
+                // matches the window: the platform has already resized the
+                // drawable, so a frame that is not redrawn leaves stale pixels
+                // in the strip that just appeared. RESIZED in particular
+                // arrives before the backbuffer has caught up, so the geometry
+                // usually measures unchanged there -- and reading that as
+                // "nothing to draw" is what left the artefacts behind while a
+                // window was being dragged larger.
+                self.ui_dirty = true;
                 self.applyGeometry();
                 self.render();
             },
@@ -309,22 +317,7 @@ pub const App = struct {
         return true;
     }
 
-    pub fn stress(self: *App) void {
-        sdl.addEventWatch(onWindowEvent, self);
-        defer sdl.removeEventWatch(onWindowEvent, self);
-        var i: i32 = 0;
-        while (i < 40 and self.running) : (i += 1) {
-            sdl.setWindowSize(self.window, 900 + i * 25, 560 + i * 15);
-            _ = self.pumpEvents();
-            _ = self.tabs.pumpAll();
-            self.render();
-            sdl.delay(40);
-        }
-        std.debug.print("STRESS done\n", .{});
-    }
-
     pub fn run(self: *App) void {
-        if (std.c.getenv("ZTABB_STRESS") != null) return self.stress();
         // Installed here rather than in `init`: this is the first point at
         // which the app is at the address it will keep.
         sdl.addEventWatch(onWindowEvent, self);
@@ -924,7 +917,9 @@ pub const App = struct {
         // Redraw only when something actually changed. With vsync on, an
         // unconditional redraw would burn a GPU frame 60 times a second for a
         // window that is simply sitting at a prompt.
-        const grid_dirty = if (self.tabs.active()) |tab| tab.active().terminal.dirty else false;
+        // Every pane of the tab, not just the focused one: a split that is
+        // being watched rather than typed into still has to repaint.
+        const grid_dirty = if (self.tabs.active()) |tab| tab.anyDirty() else false;
         if (!self.ui_dirty and !grid_dirty) return;
         self.ui_dirty = false;
 

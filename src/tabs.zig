@@ -83,6 +83,20 @@ pub const Tab = struct {
         return self.tree.count();
     }
 
+    /// Whether any pane holds output the window has not drawn yet.
+    ///
+    /// Every pane, not only the focused one: a split left running a build is
+    /// watched rather than typed into, and asking only the focused pane left
+    /// its output sitting until something else happened to force a redraw.
+    pub fn anyDirty(self: *const Tab) bool {
+        for (&self.slots) |*slot| {
+            if (slot.*) |*p| {
+                if (p.terminal.dirty) return true;
+            }
+        }
+        return false;
+    }
+
     /// The ids of the panes this tab holds, in order.
     pub fn paneIds(self: *const Tab, out: []u8) []u8 {
         return self.tree.panes(out);
@@ -843,6 +857,41 @@ test "focus moves between panes by direction" {
     // Nothing that way: focus stays put rather than wrapping.
     tabs.focusPane(.right);
     try testing.expectEqual(right, tab.focused);
+}
+
+test "an unfocused pane's output still marks the tab as needing a redraw" {
+    // The window redraws when something changed, and it used to ask only the
+    // focused pane. Output from a split left running something -- a build, a
+    // log -- then sat unseen until an unrelated event forced a frame.
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "one", 120, 40);
+    tabs.area = .{ .w = 120, .h = 40 };
+    const right = tabs.splitActive(.horizontal) catch return;
+
+    const tab = tabs.active().?;
+    // Focus the other pane, so the one being written to is in the background.
+    tabs.focusPane(.left);
+    try testing.expect(tab.focused != right);
+
+    for (&tab.slots) |*slot| {
+        if (slot.*) |*pane| pane.terminal.dirty = false;
+    }
+    try testing.expect(!tab.anyDirty());
+
+    try tab.pane(right).?.pty.write("echo background\n");
+    var seen = false;
+    for (0..2000) |_| {
+        _ = tabs.pumpAll();
+        if (tab.anyDirty()) {
+            seen = true;
+            break;
+        }
+        sleepMs(1);
+    }
+    try testing.expect(seen);
+    // And it is the background pane that is dirty, not the focused one.
+    try testing.expect(tab.pane(right).?.terminal.dirty);
 }
 
 test "keys and output go to the focused pane only" {

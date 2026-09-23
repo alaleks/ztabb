@@ -252,6 +252,7 @@ extern "c" fn SDL_WaitEventTimeout(event: *Event, timeout_ms: c_int) bool;
 extern "c" fn SDL_StartTextInput(window: ?*Window) bool;
 extern "c" fn SDL_StopTextInput(window: ?*Window) bool;
 extern "c" fn SDL_GetWindowSize(window: ?*Window, w: *c_int, h: *c_int) bool;
+extern "c" fn SDL_GetWindowPixelDensity(window: ?*Window) f32;
 extern "c" fn SDL_GetRenderOutputSize(renderer: ?*Renderer, w: *c_int, h: *c_int) bool;
 extern "c" fn SDL_SetWindowTitle(window: ?*Window, title: [*:0]const u8) bool;
 extern "c" fn SDL_CreateSurfaceFrom(w: c_int, h: c_int, format: u32, pixels: *anyopaque, pitch: c_int) ?*Surface;
@@ -444,6 +445,17 @@ pub fn getWindowSize(win: ?*Window, w: *i32, h: *i32) void {
     _ = SDL_GetWindowSize(win, &cw, &ch);
     w.* = @intCast(cw);
     h.* = @intCast(ch);
+}
+
+/// Pixels the window gets per point: 2.0 on a Retina display, 1.0 on an
+/// ordinary one, and fractional on the desktops that allow it.
+///
+/// Worth asking for directly rather than dividing the backbuffer size by the
+/// window size: those are two separately-updated numbers, and on the resize
+/// event the second has already changed while the first has not.
+pub fn getWindowPixelDensity(win: ?*Window) f32 {
+    const d = SDL_GetWindowPixelDensity(win);
+    return if (d > 0) d else 1;
 }
 
 /// The renderer's backbuffer size in *pixels*, which differs from the window
