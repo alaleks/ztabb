@@ -57,7 +57,8 @@ pub const App = struct {
 
     theme_kind: theme.Kind,
     highlight_enabled: bool = true,
-    zoom: u32 = 1,
+    /// Terminal font size in points; the interface follows it a step down.
+    font_points: u32 = font.default_points,
     dpi_scale: u32 = 1,
 
     win_w: i32 = 0,
@@ -183,7 +184,7 @@ pub const App = struct {
 
         self.win_w = px_w;
         self.win_h = px_h;
-        self.renderer.setScale(self.dpi_scale * self.zoom);
+        self.renderer.setFont(self.font_points, self.dpi_scale);
 
         const cw: i32 = @intCast(self.renderer.cellW());
         const ch: i32 = @intCast(self.renderer.cellH());
@@ -198,9 +199,17 @@ pub const App = struct {
         self.ui_dirty = true;
     }
 
+    /// How long to wait for the shell to echo a keystroke before drawing the
+    /// frame. Long enough for a local shell, short enough that a wedged one
+    /// costs a single frame.
+    const ECHO_WAIT_MS: i32 = 6;
+
     pub fn run(self: *App) void {
         while (self.running) {
             const had_input = self.pumpEvents();
+            // The echo is what the user is waiting to see, so give it the
+            // chance to arrive before this frame is drawn.
+            if (had_input) self.tabs.awaitEcho(ECHO_WAIT_MS);
             const had_output = self.tabs.pumpAll();
             if (self.tabs.reapExited() > 0) {
                 self.ui_dirty = true;
@@ -307,9 +316,9 @@ pub const App = struct {
             .prev_tab => self.tabs.prev(),
             .next_tab => self.tabs.next(),
             .select_tab => |i| self.tabs.switchTo(i) catch {},
-            .zoom_in => self.setZoom(self.zoom + 1),
-            .zoom_out => self.setZoom(self.zoom -| 1),
-            .zoom_reset => self.setZoom(1),
+            .zoom_in => self.setFontPoints(font.stepPoints(self.font_points, 1)),
+            .zoom_out => self.setFontPoints(font.stepPoints(self.font_points, -1)),
+            .zoom_reset => self.setFontPoints(font.default_points),
             .toggle_theme => {
                 self.theme_kind = theme.toggle(self.theme_kind);
                 self.showToast("theme: {s}", .{self.th().name});
@@ -323,12 +332,11 @@ pub const App = struct {
         }
     }
 
-    fn setZoom(self: *App, zoom: u32) void {
-        const clamped = std.math.clamp(zoom, 1, 4);
-        if (clamped == self.zoom) return;
-        self.zoom = clamped;
+    fn setFontPoints(self: *App, points: u32) void {
+        if (points == self.font_points) return;
+        self.font_points = points;
         self.applyGeometry();
-        self.showToast("zoom: {d}x", .{clamped});
+        self.showToast("font: {d}pt", .{points});
     }
 
     fn onTextInput(self: *App, ev: sdl.TextInputEvent) void {

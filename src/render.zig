@@ -23,8 +23,8 @@ const TAB_CLOSE_CELLS: u32 = 3;
 const PLUS_CELLS: u32 = 3;
 /// Space before the tab's icon, and between that icon and the label, in
 /// terminal cells.
-const TAB_PAD_CELLS: f32 = 0.6;
-const TAB_GAP_CELLS: f32 = 0.55;
+const TAB_PAD_CELLS: f32 = 1.0;
+const TAB_GAP_CELLS: f32 = 0.85;
 
 /// The SSH button beside "+". Wide enough to carry the larger icon: it is the
 /// entry point to every saved connection, not a decoration.
@@ -121,6 +121,9 @@ pub const Renderer = struct {
     bold: *sdl.Texture,
     /// Terminal text, in the weights the grid uses.
     atlas_size: font.Size,
+    /// The point size and display density the atlases were baked for.
+    points: u32,
+    density: u32,
     /// Interface text: weight 500 at a smaller size, for tab labels and
     /// dialogs. Terminal text has to stay on the grid; chrome does not, and
     /// reads better a step down in size and a step up in weight.
@@ -129,8 +132,6 @@ pub const Renderer = struct {
     /// One texture holding every UI icon, rasterized at the current cell size.
     icon_strip: *sdl.Texture,
     icon_size: u32,
-    /// Multiplies the 8x16 glyph box; covers both HiDPI and the user's zoom.
-    scale: u32 = 1,
 
     pub fn init(gpa: std.mem.Allocator, r: *sdl.Renderer) !Renderer {
         var self = Renderer{
@@ -138,9 +139,11 @@ pub const Renderer = struct {
             .r = r,
             .regular = undefined,
             .bold = undefined,
-            .atlas_size = font.bestSize(.regular, font.base_w, font.base_h),
+            .atlas_size = font.termSize(font.default_points, 1, .regular),
+            .points = font.default_points,
+            .density = 1,
             .ui = undefined,
-            .ui_size = font.bestSize(.medium, font.base_w, font.base_h),
+            .ui_size = font.uiSize(font.default_points, 1),
             .icon_strip = undefined,
             .icon_size = 0,
         };
@@ -243,7 +246,7 @@ pub const Renderer = struct {
         errdefer sdl.destroyTexture(regular);
         sdl.updateTexture(regular, pixels, w * 4);
 
-        font.buildAtlas(font.bestSize(.bold, size.w, size.h), pixels);
+        font.buildAtlas(font.termSize(size.points, size.density, .bold), pixels);
         const bold = try sdl.createTexture(self.r, w, h, false);
         errdefer sdl.destroyTexture(bold);
         sdl.updateTexture(bold, pixels, w * 4);
@@ -256,12 +259,16 @@ pub const Renderer = struct {
     /// Re-bakes the atlas when the cell size moves to a different glyph set,
     /// so text is rasterized at the resolution it is drawn at rather than
     /// stretched up from the smallest baked size.
-    pub fn setScale(self: *Renderer, scale: u32) void {
-        self.scale = @max(scale, 1);
+    /// Switches to a terminal face at `points` on a display of `density`,
+    /// re-baking whatever changed. The interface face and the icons follow the
+    /// terminal size, so all three stay in proportion.
+    pub fn setFont(self: *Renderer, points: u32, density: u32) void {
+        self.points = points;
+        self.density = density;
         defer self.refreshIcons();
         defer self.refreshUi();
 
-        const wanted = font.bestSize(.regular, self.cellW(), self.cellH());
+        const wanted = font.termSize(points, density, .regular);
         if (wanted.offset == self.atlas_size.offset) return;
 
         const old_regular = self.regular;
@@ -272,7 +279,7 @@ pub const Renderer = struct {
     }
 
     fn refreshUi(self: *Renderer) void {
-        const wanted = font.bestSize(.medium, self.cellW(), self.cellH());
+        const wanted = font.uiSize(self.points, self.density);
         if (wanted.offset == self.ui_size.offset) return;
         const old = self.ui;
         self.uploadUi(wanted) catch return;
@@ -289,12 +296,13 @@ pub const Renderer = struct {
         sdl.destroyTexture(old);
     }
 
+    /// The terminal cell, in backbuffer pixels.
     pub fn cellW(self: *const Renderer) u32 {
-        return font.base_w * self.scale;
+        return self.atlas_size.w;
     }
 
     pub fn cellH(self: *const Renderer) u32 {
-        return font.base_h * self.scale;
+        return self.atlas_size.h;
     }
 
     fn drawGlyph(self: *Renderer, cp: u21, x: f32, y: f32, color: u32, bold: bool) void {
@@ -361,6 +369,11 @@ pub const Renderer = struct {
             self.drawGlyph(cp, x + @as(f32, @floatFromInt(col * self.cellW())), y, color, bold);
         }
         return col;
+    }
+
+    /// One device pixel, so rules stay a hair wide on any display.
+    fn hairline(self: *const Renderer) f32 {
+        return @floatFromInt(@max(self.density, 1));
     }
 
     fn fill(self: *Renderer, x: f32, y: f32, w: f32, h: f32, color: u32) void {
@@ -453,10 +466,10 @@ pub const Renderer = struct {
                 const x = @as(f32, @floatFromInt(col)) * cw;
                 self.drawGlyph(cell.ch, x, y, fg, cell.attrs.bold);
                 if (cell.attrs.underline) {
-                    self.fill(x, y + ch - @as(f32, @floatFromInt(self.scale)), cw, @floatFromInt(self.scale), fg);
+                    self.fill(x, y + ch - self.hairline(), cw, self.hairline(), fg);
                 }
                 if (cell.attrs.strike) {
-                    self.fill(x, y + ch / 2, cw, @floatFromInt(self.scale), fg);
+                    self.fill(x, y + ch / 2, cw, self.hairline(), fg);
                 }
             }
         }
@@ -520,7 +533,7 @@ pub const Renderer = struct {
                     theme.tabGradientTop(th),
                     th.tab_active_bg,
                 );
-                self.fill(x, 0, tab_w - 1, @max(2.0, @as(f32, @floatFromInt(self.scale)) * 2), th.ansi[4]);
+                self.fill(x, 0, tab_w - 1, @max(2.0, self.hairline() * 2), th.ansi[4]);
             } else {
                 self.fill(x, 0, tab_w - 1, bar_h, th.tab_inactive_bg);
             }

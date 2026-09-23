@@ -122,6 +122,10 @@ pub const Terminal = struct {
     sb_len: u32 = 0,
     /// Rows the viewport is scrolled back from the live screen.
     view_offset: u32 = 0,
+    /// Once the history passes this many bytes, the oldest half is dropped.
+    memory_budget: usize = DEFAULT_MEMORY_BUDGET,
+    /// How many times that has happened, so the caller can say so.
+    compactions: u32 = 0,
 
     /// Window title from OSC 0/1/2, used as the tab label.
     title: [MAX_TITLE]u8 = [_]u8{0} ** MAX_TITLE,
@@ -148,6 +152,12 @@ pub const Terminal = struct {
     pub const DEFAULT_SCROLLBACK: u32 = 2000;
     /// Rows in the first scrollback allocation; it doubles from there.
     const SCROLLBACK_SEED: u32 = 128;
+    /// Bytes a single tab's history may hold. The row cap alone does not
+    /// bound it: a wide window makes every row expensive, so a tab tailing a
+    /// log on a full-screen terminal could hold tens of megabytes.
+    pub const DEFAULT_MEMORY_BUDGET: usize = 4 << 20;
+    /// History never shrinks below this, however little the budget allows.
+    const MIN_HISTORY_ROWS: u32 = 64;
 
     pub fn init(gpa: std.mem.Allocator, cols: u32, rows: u32, scrollback_rows: u32) !Terminal {
         const c = @max(cols, 1);
@@ -241,6 +251,9 @@ pub const Terminal = struct {
         self.scroll_bot = r - 1;
         self.wrap_pending = false;
         self.dirty = true;
+
+        // Wider rows cost more, so a history that fitted before may not now.
+        self.compactHistory();
     }
 
     // -- scrollback --------------------------------------------------------
@@ -250,7 +263,7 @@ pub const Terminal = struct {
     fn growScrollback(self: *Terminal) void {
         const want = @min(
             if (self.sb_rows == 0) SCROLLBACK_SEED else self.sb_rows * 2,
-            self.sb_cap,
+            self.maxHistoryRows(),
         );
         if (want <= self.sb_rows) return;
 
@@ -269,8 +282,60 @@ pub const Terminal = struct {
         self.sb_head = self.sb_len;
     }
 
+    /// Bytes the history currently occupies.
+    pub fn historyBytes(self: *const Terminal) usize {
+        return self.sb.len * @sizeOf(Cell);
+    }
+
+    /// Rows the history may hold: whichever of the row cap and the memory
+    /// budget binds first.
+    pub fn maxHistoryRows(self: *const Terminal) u32 {
+        const row_bytes = @as(usize, self.cols) * @sizeOf(Cell);
+        const by_budget = self.memory_budget / @max(row_bytes, 1);
+        const capped = @min(by_budget, self.sb_cap);
+        return @intCast(@max(capped, @min(MIN_HISTORY_ROWS, self.sb_cap)));
+    }
+
+    /// Shrinks the history back inside its budget, keeping the newest rows.
+    ///
+    /// Growing the window makes every stored row more expensive, so a history
+    /// that fitted before a resize may not after. Dropping the oldest rows --
+    /// the ones furthest from anything anyone scrolls back to -- returns that
+    /// memory rather than holding it for the rest of the session.
+    pub fn compactHistory(self: *Terminal) void {
+        const target = self.maxHistoryRows();
+        if (self.sb_rows <= target) return;
+
+        const keep_rows = @max(target, 1);
+        const new = self.gpa.alloc(Cell, @as(usize, keep_rows) * self.cols) catch return;
+        @memset(new, Cell.blank);
+
+        // Copy the newest `keep` rows, oldest first, so the ring stays ordered.
+        const keep = @min(self.sb_len, keep_rows);
+        for (0..keep) |i| {
+            const back = keep - i; // rows back from the newest
+            const slot = (self.sb_head + self.sb_rows - back) % self.sb_rows;
+            @memcpy(
+                new[i * self.cols ..][0..self.cols],
+                self.sb[@as(usize, slot) * self.cols ..][0..self.cols],
+            );
+        }
+
+        self.gpa.free(self.sb);
+        self.sb = new;
+        self.sb_rows = keep_rows;
+        self.sb_len = keep;
+        self.sb_head = keep % keep_rows;
+        self.view_offset = @min(self.view_offset, self.sb_len);
+        self.compactions += 1;
+        self.dirty = true;
+    }
+
     fn pushScrollback(self: *Terminal, row: u32) void {
         if (self.sb_cap == 0 or self.alt != null) return;
+        // Full: try to grow. Once the budget binds, growth stops and the ring
+        // simply evicts its oldest row, which is the behaviour that keeps a
+        // log-tailing tab from running away.
         if (self.sb_len == self.sb_rows) self.growScrollback();
         if (self.sb_rows == 0) return; // growth failed; drop the row
         const dst = @as(usize, self.sb_head) * self.cols;
@@ -1025,6 +1090,100 @@ test "growing the history keeps the rows in order" {
     const prev = t.scrollbackRow(2).?;
     try testing.expectEqual(@as(u21, '9'), last[0].ch);
     try testing.expectEqual(@as(u21, '8'), prev[0].ch);
+}
+
+test "a tab tailing a log stops growing at its memory budget" {
+    // The row cap alone does not bound this: on a wide window each row is
+    // expensive, and the tab would hold tens of megabytes for the session.
+    var t = try Terminal.init(testing.allocator, 200, 4, 100_000);
+    defer t.deinit();
+    t.memory_budget = 1 << 20;
+
+    for (0..40_000) |_| t.write("x\r\n");
+
+    try testing.expect(t.historyBytes() <= t.memory_budget);
+    try testing.expect(t.sb_rows <= t.maxHistoryRows());
+    // The recent output is what survives, and it is still there.
+    try testing.expect(t.sb_len > 0);
+    try testing.expectEqual(@as(u21, 'x'), t.scrollbackRow(1).?[0].ch);
+}
+
+test "widening the window shrinks the history back inside the budget" {
+    var t = try Terminal.init(testing.allocator, 40, 4, 100_000);
+    defer t.deinit();
+    t.memory_budget = 512 * 1024;
+    for (0..20_000) |_| t.write("x\r\n");
+    const rows_before = t.sb_rows;
+    try testing.expect(t.historyBytes() <= t.memory_budget);
+
+    // Ten times the width: every stored row now costs ten times as much.
+    try t.resize(400, 4);
+    try testing.expect(t.historyBytes() <= t.memory_budget);
+    try testing.expect(t.sb_rows < rows_before);
+}
+
+test "the budget never squeezes the history below a usable size" {
+    var t = try Terminal.init(testing.allocator, 500, 4, 5000);
+    defer t.deinit();
+    t.memory_budget = 1024; // absurdly small
+    try testing.expect(t.maxHistoryRows() >= 64);
+}
+
+test "compaction keeps the newest rows, in order" {
+    var t = try Terminal.init(testing.allocator, 4, 1, 4096);
+    defer t.deinit();
+    t.memory_budget = 4096 * 4 * @sizeOf(Cell) / 4; // forces a shrink below
+    for (0..600) |i| {
+        var buf: [8]u8 = undefined;
+        t.write(std.fmt.bufPrint(&buf, "{d}\r\n", .{i % 10}) catch unreachable);
+    }
+    const before = t.sb_len;
+    const newest = t.scrollbackRow(1).?[0].ch;
+    const second = t.scrollbackRow(2).?[0].ch;
+
+    t.memory_budget = 64 * 4 * @sizeOf(Cell);
+    t.compactHistory();
+
+    try testing.expectEqual(@as(u32, 1), t.compactions);
+    try testing.expect(t.sb_len < before);
+    try testing.expect(t.sb_len > 0);
+    // The most recent rows are untouched and still in order.
+    try testing.expectEqual(newest, t.scrollbackRow(1).?[0].ch);
+    try testing.expectEqual(second, t.scrollbackRow(2).?[0].ch);
+}
+
+test "compaction leaves a history that fits alone" {
+    var t = try testTerm(5, 2);
+    defer t.deinit();
+    t.write("a\r\nb\r\nc");
+    const rows = t.sb_rows;
+    t.compactHistory();
+    try testing.expectEqual(rows, t.sb_rows);
+    try testing.expectEqual(@as(u32, 0), t.compactions);
+}
+
+test "writing continues correctly after a compaction" {
+    var t = try Terminal.init(testing.allocator, 4, 1, 4096);
+    defer t.deinit();
+    for (0..600) |_| t.write("a\r\n");
+    t.memory_budget = 64 * 4 * @sizeOf(Cell);
+    t.compactHistory();
+    for (0..50) |_| t.write("b\r\n");
+    try testing.expectEqual(@as(u21, 'b'), t.scrollbackRow(1).?[0].ch);
+    try testing.expect(t.sb_len <= t.sb_rows);
+    try testing.expect(t.sb_head < t.sb_rows);
+}
+
+test "a scrolled-back view survives a compaction" {
+    var t = try Terminal.init(testing.allocator, 4, 1, 4096);
+    defer t.deinit();
+    for (0..600) |_| t.write("a\r\n");
+    t.scrollView(400);
+    t.memory_budget = 64 * 4 * @sizeOf(Cell);
+    t.compactHistory();
+    try testing.expect(t.view_offset <= t.sb_len);
+    // The viewport still resolves to real rows rather than reading past the end.
+    for (0..t.rows) |r| _ = t.viewRow(@intCast(r));
 }
 
 test "a width change releases the history instead of re-reserving it" {

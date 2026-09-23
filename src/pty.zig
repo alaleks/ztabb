@@ -43,10 +43,18 @@ const libc = struct {
     extern "c" fn dup2(old: c_int, new: c_int) c_int;
     extern "c" fn kill(pid: posix.pid_t, sig: c_int) c_int;
     extern "c" fn usleep(usec: c_uint) c_int;
+    extern "c" fn poll(fds: [*]PollFd, nfds: c_uint, timeout: c_int) c_int;
     extern "c" fn _exit(code: c_int) noreturn;
     extern "c" fn __error() *c_int;
     extern "c" var environ: [*:null]?[*:0]const u8;
 };
+
+const PollFd = extern struct {
+    fd: c_int,
+    events: c_short,
+    revents: c_short,
+};
+const POLLIN: c_short = 0x0001;
 
 const EAGAIN: c_int = 35;
 const EINTR: c_int = 4;
@@ -165,6 +173,16 @@ pub const Pty = struct {
             if (n == 0) return error.Closed;
             off += @intCast(n);
         }
+    }
+
+    /// Blocks until the child has something to say, or `timeout_ms` passes.
+    ///
+    /// Used right after a keystroke: a shell echoes within a millisecond or
+    /// two, and waiting for it means the character appears in the same frame
+    /// as the key press rather than the next one.
+    pub fn waitReadable(self: *Pty, timeout_ms: i32) bool {
+        var fds = [_]PollFd{.{ .fd = self.master, .events = POLLIN, .revents = 0 }};
+        return libc.poll(&fds, 1, timeout_ms) > 0;
     }
 
     pub fn resize(self: *Pty, cols: u16, rows: u16) void {
@@ -379,6 +397,22 @@ test "spawnShell starts the user's login shell and it responds" {
     }
     try std.testing.expect(total > 0);
     try std.testing.expect(exited);
+}
+
+test "waitReadable reports data and times out when there is none" {
+    const argv = [_][*:0]const u8{ "/bin/cat", "-u" };
+    var pty = try Pty.spawn(&argv, &.{}, 80, 24);
+    defer pty.close();
+
+    // Nothing sent yet: the wait must return empty-handed rather than hang.
+    try std.testing.expect(!pty.waitReadable(20));
+
+    try pty.write("ping\n");
+    try std.testing.expect(pty.waitReadable(2000));
+
+    var buf: [64]u8 = undefined;
+    const n = try pty.read(&buf);
+    try std.testing.expect(n > 0);
 }
 
 test "resize does not fail on a live pty" {

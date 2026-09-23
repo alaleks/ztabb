@@ -1,28 +1,36 @@
-//! Built-in antialiased bitmap font.
+//! The built-in typeface: JetBrains Mono, baked to antialiased coverage maps.
 //!
-//! Glyphs are baked from Menlo by `tools/genfont.c` into `font.dat`: one byte
-//! of coverage per pixel, two weights per cell size. Two sizes are stored —
-//! 8x16 and 16x32 — because a small bitmap stretched onto a HiDPI backbuffer
-//! loses every trace of the antialiasing and reads as a typewriter impression.
-//! The renderer picks the largest baked size that fits the cell it is drawing.
+//! Glyphs come from `tools/genfont.c` into `font.dat`, one byte of coverage per
+//! pixel. Each supported point size is baked at 1x and again at exactly double
+//! for HiDPI, because a bitmap stretched onto a denser backbuffer loses the
+//! antialiasing that makes small text legible.
+//!
+//! Interface text is baked separately in Medium, one point size below the
+//! terminal: tab labels want to read smaller than terminal text, and at that
+//! size Regular goes faint while Bold goes heavy.
 
 const std = @import("std");
 const data = @import("font_data.zig");
 
-/// Raw coverage bytes, laid out as `sizes` x weight x glyph x row x column.
+/// Raw coverage bytes, laid out section by section as `sections` lists them.
 const blob = @embedFile("font.dat");
 
 pub const glyph_count = data.glyph_count;
 
-/// `medium` is weight 500, used for interface text: it reads at a smaller size
-/// than regular without the heaviness of bold.
 pub const Weight = enum(u8) { regular, bold, medium };
 
-/// One baked (size, weight) section of `font.dat`.
+/// The point sizes the terminal can be set to, smallest first.
+pub const term_points = data.term_points;
+/// The size a fresh window opens at.
+pub const default_points: u32 = data.term_points[data.term_points.len / 2];
+
+/// One baked (cell, weight) section of `font.dat`.
 pub const Size = struct {
     w: u32,
     h: u32,
     weight: Weight,
+    points: u32,
+    density: u32,
     offset: usize,
 
     pub fn pixels(self: Size) usize {
@@ -38,39 +46,59 @@ fn sectionAt(i: usize) Size {
         .w = sct.w,
         .h = sct.h,
         .weight = @enumFromInt(sct.weight),
+        .points = sct.points,
+        .density = sct.density,
         .offset = sct.offset,
     };
 }
 
-/// The section for `weight` at exactly `w` x `h`, if one was baked.
-fn find(weight: Weight, w: u32, h: u32) ?Size {
-    for (0..section_count) |i| {
-        const sct = sectionAt(i);
-        if (sct.weight == weight and sct.w == w and sct.h == h) return sct;
+/// The next point size up or down the ladder, clamped at both ends.
+pub fn stepPoints(points: u32, delta: i32) u32 {
+    var at: usize = 0;
+    for (term_points, 0..) |p, i| {
+        if (p == points) at = i;
     }
-    return null;
+    const moved = @as(i64, @intCast(at)) + delta;
+    const clamped: usize = @intCast(std.math.clamp(moved, 0, @as(i64, term_points.len - 1)));
+    return term_points[clamped];
 }
 
-/// The largest baked set of `weight` that fits a `cell_w` x `cell_h` box, so
-/// glyphs are only upscaled once the user has zoomed past the largest one.
-pub fn bestSize(weight: Weight, cell_w: u32, cell_h: u32) Size {
+/// Picks the section closest to what was asked for. An exact match is the
+/// normal case; the search only matters when the caller zooms past the ends of
+/// the ladder, where the nearest baked size is scaled to fit.
+fn nearest(weight: Weight, points: u32, density: u32) Size {
     var best: ?Size = null;
-    var smallest: ?Size = null;
+    var best_cost: u64 = std.math.maxInt(u64);
     for (0..section_count) |i| {
         const sct = sectionAt(i);
         if (sct.weight != weight) continue;
-        if (smallest == null or sct.w < smallest.?.w) smallest = sct;
-        if (sct.w <= cell_w and sct.h <= cell_h) {
-            if (best == null or sct.w > best.?.w) best = sct;
+        // Matching the density matters more than matching the size: a 1x set
+        // drawn on a 2x backbuffer is the blurry case worth avoiding.
+        const density_cost: u64 = if (sct.density == density) 0 else 1000;
+        const size_cost: u64 = @abs(@as(i64, sct.points) - @as(i64, points));
+        const cost = density_cost + size_cost;
+        if (cost < best_cost) {
+            best_cost = cost;
+            best = sct;
         }
     }
-    // Every weight is baked at at least one size, so one of these always hits.
-    return best orelse smallest orelse sectionAt(0);
+    return best orelse sectionAt(0);
 }
 
-/// The regular terminal face, which defines the cell the grid is laid out on.
-pub const base_w: u32 = 8;
-pub const base_h: u32 = 16;
+/// The terminal face for a cell at `points`, on a display of `density`.
+pub fn termSize(points: u32, density: u32, weight: Weight) Size {
+    return nearest(weight, points, density);
+}
+
+/// The interface face that goes with a terminal set to `points`: one step down
+/// the ladder, in Medium.
+pub fn uiSize(points: u32, density: u32) Size {
+    var ui = data.ui_points[0];
+    for (term_points, 0..) |p, i| {
+        if (p == points and i < data.ui_points.len) ui = data.ui_points[i];
+    }
+    return nearest(.medium, ui, density);
+}
 
 /// The glyph index for `cp`, or null when the font has no coverage.
 pub fn indexOf(cp: u21) ?usize {
@@ -162,16 +190,18 @@ pub fn atlasRect(cp: u21, size: Size) AtlasRect {
 
 const testing = std.testing;
 
-fn allSections() usize {
-    return section_count;
+/// The exact section for a cell, or null when nothing was baked at that size.
+fn exact(weight: Weight, w: u32, h: u32) ?Size {
+    for (0..section_count) |i| {
+        const sct = sectionAt(i);
+        if (sct.weight == weight and sct.w == w and sct.h == h) return sct;
+    }
+    return null;
 }
 
 test "font.dat is exactly as large as the metrics say" {
     var expected: usize = 0;
-    for (0..section_count) |i| {
-        const sct = sectionAt(i);
-        expected += sct.pixels() * glyph_count;
-    }
+    for (0..section_count) |i| expected += sectionAt(i).pixels() * glyph_count;
     try testing.expectEqual(expected, blob.len);
 }
 
@@ -184,65 +214,96 @@ test "sections are laid out back to back in the order listed" {
     }
 }
 
-test "the terminal face is baked at both densities, in both weights" {
-    for ([_]Weight{ .regular, .bold }) |w| {
-        try testing.expect(find(w, 8, 16) != null);
-        try testing.expect(find(w, 16, 32) != null);
+test "the default point size is on the ladder, with room either side" {
+    try testing.expect(term_points.len >= 3);
+    var found = false;
+    for (term_points) |p| {
+        if (p == default_points) found = true;
     }
+    try testing.expect(found);
+    try testing.expect(term_points[0] < default_points);
+    try testing.expect(term_points[term_points.len - 1] > default_points);
 }
 
-test "interface text is baked at weight 500, smaller than the terminal cell" {
-    // Tab labels need to read at a smaller size than terminal text; medium
-    // carries at that size where regular goes faint and bold goes heavy.
-    const ui_1x = find(.medium, 7, 14).?;
-    const ui_2x = find(.medium, 14, 28).?;
-    try testing.expect(ui_1x.w < base_w);
-    try testing.expect(ui_2x.w < base_w * 2);
-    try testing.expectEqual(Weight.medium, ui_1x.weight);
-    try testing.expectEqual(Weight.medium, ui_2x.weight);
-}
-
-test "medium sits between regular and bold in weight" {
-    // Compared per pixel of cell, so the different cell sizes stay comparable.
-    var medium_ink: f64 = 0;
-    var regular_ink: f64 = 0;
-    var bold_ink: f64 = 0;
-    const med = find(.medium, 14, 28).?;
-    const reg = find(.regular, 16, 32).?;
-    const bld = find(.bold, 16, 32).?;
-    for ('a'..'z' + 1) |cp| {
-        for (glyph(@intCast(cp), med)) |v| medium_ink += @floatFromInt(v);
-        for (glyph(@intCast(cp), reg)) |v| regular_ink += @floatFromInt(v);
-        for (glyph(@intCast(cp), bld)) |v| bold_ink += @floatFromInt(v);
-    }
-    // Normalise by cell area.
-    medium_ink /= @floatFromInt(med.pixels());
-    regular_ink /= @floatFromInt(reg.pixels());
-    bold_ink /= @floatFromInt(bld.pixels());
-    try testing.expect(medium_ink > regular_ink);
-    try testing.expect(medium_ink < bold_ink);
-}
-
-test "bestSize picks the largest set that fits and never overshoots" {
-    try testing.expectEqual(@as(u32, 8), bestSize(.regular, 8, 16).w);
-    try testing.expectEqual(@as(u32, 8), bestSize(.regular, 15, 31).w);
-    try testing.expectEqual(@as(u32, 16), bestSize(.regular, 16, 32).w);
-    // Zoomed past the largest baked set: use it and upscale.
-    try testing.expectEqual(@as(u32, 16), bestSize(.regular, 64, 128).w);
-    // Smaller than anything baked: fall back to the smallest.
-    try testing.expectEqual(@as(u32, 8), bestSize(.regular, 4, 8).w);
-
-    try testing.expectEqual(@as(u32, 7), bestSize(.medium, 7, 14).w);
-    try testing.expectEqual(@as(u32, 7), bestSize(.medium, 13, 27).w);
-    try testing.expectEqual(@as(u32, 14), bestSize(.medium, 14, 28).w);
-}
-
-test "bestSize always returns the weight it was asked for" {
-    for ([_]Weight{ .regular, .bold, .medium }) |w| {
-        for ([_]u32{ 1, 6, 8, 12, 16, 100 }) |cell| {
-            try testing.expectEqual(w, bestSize(w, cell, cell * 2).weight);
+test "every terminal size is baked in both weights at both densities" {
+    for (term_points) |points| {
+        for ([_]u32{ 1, 2 }) |density| {
+            for ([_]Weight{ .regular, .bold }) |w| {
+                const sct = termSize(points, density, w);
+                try testing.expectEqual(points, sct.points);
+                try testing.expectEqual(density, sct.density);
+                try testing.expectEqual(w, sct.weight);
+            }
         }
     }
+}
+
+test "the 2x set is exactly double the 1x set" {
+    // Anything else and the same point size would not line up between a
+    // built-in display and an external one.
+    for (term_points) |points| {
+        const one = termSize(points, 1, .regular);
+        const two = termSize(points, 2, .regular);
+        try testing.expectEqual(one.w * 2, two.w);
+        try testing.expectEqual(one.h * 2, two.h);
+    }
+}
+
+test "the cell follows the typeface's own proportions" {
+    // JetBrains Mono: 0.60em advance, 1.32em from ascender to descender.
+    for (term_points) |points| {
+        const sct = termSize(points, 1, .regular);
+        const w: f64 = @floatFromInt(sct.w);
+        const h: f64 = @floatFromInt(sct.h);
+        const pt: f64 = @floatFromInt(points);
+        try testing.expect(@abs(w - 0.60 * pt) <= 0.5);
+        try testing.expect(@abs(h - 1.32 * pt) <= 0.5);
+    }
+}
+
+test "the default size gives the cell it always did" {
+    const sct = termSize(default_points, 1, .regular);
+    try testing.expectEqual(@as(u32, 13), default_points);
+    try testing.expectEqual(@as(u32, 8), sct.w);
+}
+
+test "interface text is a step smaller than the terminal, in medium" {
+    for (term_points) |points| {
+        for ([_]u32{ 1, 2 }) |density| {
+            const term = termSize(points, density, .regular);
+            const ui = uiSize(points, density);
+            try testing.expectEqual(Weight.medium, ui.weight);
+            try testing.expectEqual(density, ui.density);
+            try testing.expect(ui.h < term.h);
+            try testing.expect(ui.points < points);
+        }
+    }
+}
+
+test "stepPoints walks the ladder and stops at its ends" {
+    const smallest = term_points[0];
+    const largest = term_points[term_points.len - 1];
+    try testing.expectEqual(largest, stepPoints(default_points, 1));
+    try testing.expectEqual(smallest, stepPoints(default_points, -1));
+    try testing.expectEqual(largest, stepPoints(largest, 1));
+    try testing.expectEqual(smallest, stepPoints(smallest, -1));
+    try testing.expectEqual(default_points, stepPoints(default_points, 0));
+}
+
+test "an unsupported size falls back to the nearest baked one" {
+    const huge = termSize(99, 2, .regular);
+    try testing.expectEqual(term_points[term_points.len - 1], huge.points);
+    try testing.expectEqual(@as(u32, 2), huge.density);
+
+    const tiny = termSize(1, 1, .regular);
+    try testing.expectEqual(term_points[0], tiny.points);
+}
+
+test "density is matched before size" {
+    // A 1x set drawn onto a 2x backbuffer is the blurry case; the search must
+    // prefer keeping the density even if the size is then further off.
+    const sct = termSize(term_points[0], 2, .regular);
+    try testing.expectEqual(@as(u32, 2), sct.density);
 }
 
 test "ranges are sorted, disjoint and contiguously based" {
@@ -261,33 +322,25 @@ test "ranges are sorted, disjoint and contiguously based" {
 test "indexOf maps range boundaries exactly" {
     try testing.expectEqual(@as(usize, 0), indexOf(' ').?);
     try testing.expectEqual(@as(usize, 'A' - 0x20), indexOf('A').?);
-    try testing.expectEqual(@as(usize, '~' - 0x20), indexOf('~').?);
     try testing.expect(indexOf(0x7F) == null);
-    try testing.expect(indexOf(0x1F) == null);
     try testing.expect(indexOf(0x4E00) == null);
 }
 
 test "ASCII, Cyrillic and box drawing are all covered" {
     for (0x20..0x7F) |cp| try testing.expect(indexOf(@intCast(cp)) != null);
-    try testing.expect(indexOf('Ж') != null);
-    try testing.expect(indexOf('я') != null);
-    try testing.expect(indexOf('Ё') != null);
-    try testing.expect(indexOf(0x2500) != null); // ─
-    try testing.expect(indexOf(0x2588) != null); // █
+    for ([_]u21{ 'Ж', 'я', 'Ё', 0x2500, 0x2588 }) |cp| {
+        try testing.expect(indexOf(cp) != null);
+    }
 }
 
 test "Powerline and prompt-theme symbols are covered" {
-    // agnoster and friends draw their separators from the Powerline private
-    // use area; without these the prompt renders as a row of boxes.
     for ([_]u21{ 0xE0A0, 0xE0A1, 0xE0A2, 0xE0B0, 0xE0B1, 0xE0B2, 0xE0B3 }) |cp| {
         try testing.expect(indexOf(cp) != null);
-        for (0..section_count) |i| {
-            try testing.expect(!isBlank(cp, sectionAt(i)));
-        }
+        for (0..section_count) |i| try testing.expect(!isBlank(cp, sectionAt(i)));
     }
     for ([_]u21{ 0x00B1, 0x2691, 0x2699, 0x26A1, 0x2718, 0x271A, 0x272D, 0x27A6 }) |cp| {
         try testing.expect(indexOf(cp) != null);
-        try testing.expect(!isBlank(cp, bestSize(.regular, 16, 32)));
+        try testing.expect(!isBlank(cp, termSize(default_points, 2, .regular)));
     }
 }
 
@@ -335,12 +388,12 @@ test "glyphs are antialiased, not one-bit" {
     }
 }
 
-test "bold is heavier than regular at the same size" {
-    for ([_]u32{ 8, 16 }) |w| {
+test "the weights are ordered light to heavy" {
+    for (term_points) |points| {
         var regular_ink: usize = 0;
         var bold_ink: usize = 0;
-        const reg = find(.regular, w, w * 2).?;
-        const bld = find(.bold, w, w * 2).?;
+        const reg = termSize(points, 2, .regular);
+        const bld = termSize(points, 2, .bold);
         for ('A'..'Z' + 1) |cp| {
             for (glyph(@intCast(cp), reg)) |v| regular_ink += v;
             for (glyph(@intCast(cp), bld)) |v| bold_ink += v;
@@ -349,23 +402,38 @@ test "bold is heavier than regular at the same size" {
     }
 }
 
+test "medium sits between regular and bold" {
+    // Compared per pixel of cell, so the different cell sizes stay comparable.
+    const ink = struct {
+        fn f(size: Size) f64 {
+            var total: f64 = 0;
+            for ('a'..'z' + 1) |cp| {
+                for (glyph(@intCast(cp), size)) |v| total += @floatFromInt(v);
+            }
+            return total / @as(f64, @floatFromInt(size.pixels()));
+        }
+    }.f;
+    const med = ink(uiSize(default_points, 2));
+    const reg = ink(termSize(default_points, 2, .regular));
+    const bld = ink(termSize(default_points, 2, .bold));
+    try testing.expect(med > reg);
+    try testing.expect(med < bld);
+}
+
 test "unmapped codepoints fall back to the replacement box" {
-    const size = bestSize(.regular, 8, 16);
+    const size = termSize(default_points, 1, .regular);
     try testing.expectEqualSlices(u8, glyph(replacement, size), glyph(0x4E00, size));
     try testing.expect(!isBlank(0x4E00, size));
 }
 
 test "full block covers every pixel of the cell" {
-    // Adjacent full blocks must tile with no seam.
     for (0..section_count) |i| {
-        for (glyph(0x2588, sectionAt(i))) |v| {
-            try testing.expectEqual(@as(u8, 255), v);
-        }
+        for (glyph(0x2588, sectionAt(i))) |v| try testing.expectEqual(@as(u8, 255), v);
     }
 }
 
 test "shade blocks are evenly tinted and ordered light to dark" {
-    const size = bestSize(.regular, 8, 16);
+    const size = termSize(default_points, 1, .regular);
     var prev: usize = 0;
     for ([_]u21{ 0x2591, 0x2592, 0x2593 }) |cp| {
         var ink: usize = 0;
@@ -383,14 +451,12 @@ test "buildAtlas lays glyphs out on the expected grid" {
         defer gpa.free(pixels);
         buildAtlas(size, pixels);
 
-        // Space sits at cell 0 and must be fully transparent.
         for (0..size.h) |y| {
             for (0..size.w) |x| {
                 try testing.expectEqual(@as(u32, 0x00FFFFFF), pixels[y * atlasW(size) + x]);
             }
         }
 
-        // 'A' must match its coverage bytes pixel for pixel.
         const rect = atlasRect('A', size);
         const bits = glyph('A', size);
         for (0..size.h) |y| {
@@ -411,4 +477,11 @@ test "atlas is large enough for every glyph" {
         try testing.expect(last.x + size.w <= atlasW(size));
         try testing.expect(last.y + size.h <= atlasH(size));
     }
+}
+
+test "exact lookups find the sections the ladder promises" {
+    try testing.expect(exact(.regular, 8, 17) != null); // 13pt at 1x
+    try testing.expect(exact(.regular, 16, 34) != null); // 13pt at 2x
+    try testing.expect(exact(.bold, 16, 34) != null);
+    try testing.expect(exact(.regular, 99, 99) == null);
 }

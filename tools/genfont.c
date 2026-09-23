@@ -21,28 +21,61 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Weight bits. Menlo ships Regular and Bold only, so `medium` (weight 500) is
-// synthesized by stroking the regular outline: controllable, and closer to 500
-// than either real face.
+// Weight bits.
 #define W_REGULAR 1
 #define W_BOLD    2
 #define W_MEDIUM  4
 
-typedef struct { int w, h; int weights; } Cell;
+// JetBrains Mono: advance 0.60em, ascent 1.02em, descent 0.30em. The cell is
+// the advance by the full ascent plus descent, so descenders are not clipped.
+#define ADVANCE_EM 0.60
+#define LINE_EM    1.32
 
-// Terminal cells at 1x and 2x, plus the smaller sizes the tab bar and dialogs
-// set their labels in. font.zig picks the largest set that fits the box it is
-// drawing into.
-static const Cell cells[] = {
-    {7, 14, W_MEDIUM},            // UI text, 1x
-    {8, 16, W_REGULAR | W_BOLD},  // terminal, 1x
-    {14, 28, W_MEDIUM},           // UI text, 2x
-    {16, 32, W_REGULAR | W_BOLD}, // terminal, 2x
-};
-#define NCELLS ((int)(sizeof(cells) / sizeof(cells[0])))
+static const char *face_name(int bit) {
+    return bit == W_REGULAR ? "JetBrainsMono-Regular"
+         : bit == W_BOLD    ? "JetBrainsMono-Bold"
+                            : "JetBrainsMono-Medium";
+}
 
 static const char *weight_name(int bit) {
     return bit == W_REGULAR ? "regular" : bit == W_BOLD ? "bold" : "medium";
+}
+
+// Point sizes the terminal can be set to, and the interface sizes that go with
+// them -- one step down, so tab labels read smaller than terminal text.
+// Each is baked at 1x and again at exactly double for HiDPI, because a bitmap
+// stretched onto a denser backbuffer loses the antialiasing that makes it
+// legible.
+static const int term_points[] = {11, 13, 16};
+static const int ui_points[] = {10, 11, 13};
+#define NTERM ((int)(sizeof(term_points) / sizeof(term_points[0])))
+#define NUI ((int)(sizeof(ui_points) / sizeof(ui_points[0])))
+#define NDENSITY 2
+
+typedef struct { int w, h, weights, points, density; } Cell;
+
+static int cell_w(int points) {
+    return (int)(ADVANCE_EM * points + 0.5);
+}
+
+static int cell_h(int points) {
+    return (int)(LINE_EM * points + 0.5);
+}
+
+/// Every (cell, weight) section, in the order they are written.
+static int buildCells(Cell *out) {
+    int n = 0;
+    for (int d = 1; d <= NDENSITY; d++) {
+        for (int i = 0; i < NUI; i++) {
+            out[n++] = (Cell){cell_w(ui_points[i]) * d, cell_h(ui_points[i]) * d,
+                              W_MEDIUM, ui_points[i], d};
+        }
+        for (int i = 0; i < NTERM; i++) {
+            out[n++] = (Cell){cell_w(term_points[i]) * d, cell_h(term_points[i]) * d,
+                              W_REGULAR | W_BOLD, term_points[i], d};
+        }
+    }
+    return n;
 }
 
 typedef struct { unsigned int lo, hi; } Range;
@@ -258,7 +291,7 @@ static double sizeForAdvance(const char *name, double target) {
 /// Rasterizes one codepoint into `w`x`h` 8-bit coverage. Returns 0 when the
 /// face has no glyph for it.
 static int rasterize(CTFontRef font, unsigned int cp, int w, int h,
-                     double baseline, double embolden, unsigned char *out) {
+                     double baseline, unsigned char *out) {
     UniChar chars[2];
     CFIndex nchars = 1;
     if (cp < 0x10000) {
@@ -312,13 +345,6 @@ static int rasterize(CTFontRef font, unsigned int cp, int w, int h,
     CGContextSetGrayFillColor(ctx, 0.0, 1.0);
     CGContextFillRect(ctx, CGRectMake(0, 0, w, h));
     CGContextSetGrayFillColor(ctx, 1.0, 1.0);
-    if (embolden > 0) {
-        // Fill plus a hairline stroke in the same colour: the usual way to
-        // lift a face one weight step when there is no real face to draw from.
-        CGContextSetGrayStrokeColor(ctx, 1.0, 1.0);
-        CGContextSetLineWidth(ctx, embolden);
-        CGContextSetTextDrawingMode(ctx, kCGTextFillStroke);
-    }
     CGContextSetShouldAntialias(ctx, true);
     CGContextSetShouldSmoothFonts(ctx, false); // grayscale AA, not subpixel
     CGContextSetAllowsFontSubpixelPositioning(ctx, true);
@@ -368,19 +394,21 @@ int main(int argc, char **argv) {
     int total = 0;
     for (int i = 0; i < nranges; i++) total += (int)(ranges[i].hi - ranges[i].lo + 1);
 
-    static const char *names[2] = {"Menlo-Regular", "Menlo-Bold"};
+    Cell cells[(NTERM + NUI) * NDENSITY];
+    const int ncells = buildCells(cells);
 
     if (argc > 1) {
-        int w = cells[1].w, h = cells[1].h;
-        double size = sizeForAdvance(names[0], w);
-        CTFontRef f = makeFont(names[0], size);
-        double asc = CTFontGetAscent(f), desc = CTFontGetDescent(f);
-        double baseline = (h - (asc + desc)) / 2.0 + desc;
+        // Dump codepoints as ASCII art at the default terminal cell.
+        const int w = cell_w(term_points[1]), h = cell_h(term_points[1]);
+        const char *face = face_name(W_REGULAR);
+        CTFontRef f = makeFont(face, sizeForAdvance(face, w));
+        const double baseline = (h - (CTFontGetAscent(f) + CTFontGetDescent(f))) / 2.0 +
+                                CTFontGetDescent(f);
         unsigned char *g = malloc((size_t)w * h);
         for (int i = 1; i < argc; i++) {
             unsigned int cp = (unsigned int)strtol(argv[i], NULL, 0);
             if (!blockGlyph(cp, w, h, g) && !powerlineGlyph(cp, w, h, g)) {
-                if (rasterize(f, cp, w, h, baseline, 0, g)) boostContrast(g, w * h);
+                if (rasterize(f, cp, w, h, baseline, g)) boostContrast(g, w * h);
             }
             dump(g, w, h, cp);
         }
@@ -393,74 +421,48 @@ int main(int argc, char **argv) {
     if (!dat) { perror("src/font.dat"); return 1; }
 
     long offset = 0;
-    struct { long offset; int w, h, weight; } sections[NCELLS * 3];
+    struct { long offset; int w, h, weight, points, density; } sections[(NTERM + NUI) * NDENSITY * 2];
     int nsections = 0;
 
-    for (int c = 0; c < NCELLS; c++) {
-        int w = cells[c].w, h = cells[c].h;
+    for (int c = 0; c < ncells; c++) {
+        const int w = cells[c].w, h = cells[c].h;
         unsigned char *g = malloc((size_t)w * h);
 
         for (int bit = W_REGULAR; bit <= W_MEDIUM; bit <<= 1) {
             if (!(cells[c].weights & bit)) continue;
 
-            // Medium is Menlo-Regular with a hairline stroke; the stroke is a
-            // fraction of the cell so it scales with the size. Tuned so the result
-            // lands between the regular and bold faces rather than beside bold.
-            const char *face = (bit == W_BOLD) ? names[1] : names[0];
-            double embolden = (bit == W_MEDIUM) ? w * 0.020 : 0.0;
-
-            double size = sizeForAdvance(face, w);
-            CTFontRef font = makeFont(face, size);
-            CTFontRef fallback = makeFont(names[0], sizeForAdvance(names[0], w));
+            const char *face = face_name(bit);
+            CTFontRef font = makeFont(face, sizeForAdvance(face, w));
             if (!font) { fprintf(stderr, "%s not found\n", face); return 1; }
-            double asc = CTFontGetAscent(font), desc = CTFontGetDescent(font);
-            double baseline = (h - (asc + desc)) / 2.0 + desc;
+            const double baseline =
+                (h - (CTFontGetAscent(font) + CTFontGetDescent(font))) / 2.0 +
+                CTFontGetDescent(font);
 
-            sections[nsections].offset = offset;
-            sections[nsections].w = w;
-            sections[nsections].h = h;
-            sections[nsections].weight = bit;
-            nsections++;
+            sections[nsections++] = (typeof(sections[0])){
+                offset, w, h, bit, cells[c].points, cells[c].density,
+            };
 
             int missing = 0;
             for (int i = 0; i < nranges; i++) {
                 for (unsigned int cp = ranges[i].lo; cp <= ranges[i].hi; cp++) {
-                    if (blockGlyph(cp, w, h, g) || powerlineGlyph(cp, w, h, g)) {
-                        if (bit == W_BOLD && cp >= 0xE0A0 && cp <= 0xE0A2) {
-                            // Embolden the pictograms; the separators must stay
-                            // exact so they still tile.
-                            for (int y = 0; y < h; y++)
-                                for (int x = w - 1; x > 0; x--)
-                                    if (g[y * w + x - 1] > g[y * w + x])
-                                        g[y * w + x] = g[y * w + x - 1];
+                    // Separators and block elements are drawn rather than taken
+                    // from the face: only exact geometry tiles without a seam.
+                    if (!blockGlyph(cp, w, h, g) && !powerlineGlyph(cp, w, h, g)) {
+                        if (rasterize(font, cp, w, h, baseline, g)) {
+                            boostContrast(g, w * h);
+                        } else {
+                            memset(g, 0, (size_t)w * h);
+                            missing++;
                         }
-                        fwrite(g, 1, (size_t)w * h, dat);
-                        offset += w * h;
-                        continue;
-                    }
-                    if (rasterize(font, cp, w, h, baseline, embolden, g)) {
-                        boostContrast(g, w * h);
-                    } else if (bit != W_REGULAR &&
-                               rasterize(fallback, cp, w, h, baseline, embolden, g)) {
-                        boostContrast(g, w * h);
-                        if (bit == W_BOLD) {
-                            for (int y = 0; y < h; y++)
-                                for (int x = w - 1; x > 0; x--)
-                                    if (g[y * w + x - 1] > g[y * w + x])
-                                        g[y * w + x] = g[y * w + x - 1];
-                        }
-                    } else {
-                        memset(g, 0, (size_t)w * h);
-                        missing++;
                     }
                     fwrite(g, 1, (size_t)w * h, dat);
                     offset += w * h;
                 }
             }
-            fprintf(stderr, "%dx%d %-8s: %d/%d blank\n",
-                    w, h, weight_name(bit), missing, total);
+            fprintf(stderr, "%2dpt@%dx %2dx%-2d %-8s: %d/%d blank\n",
+                    cells[c].points, cells[c].density, w, h,
+                    weight_name(bit), missing, total);
             CFRelease(font);
-            CFRelease(fallback);
         }
         free(g);
     }
@@ -470,19 +472,31 @@ int main(int argc, char **argv) {
     if (!out) { perror("src/font_data.zig"); return 1; }
     fprintf(out, "// Generated by tools/genfont.c -- do not edit by hand.\n");
     fprintf(out, "// Glyph coverage lives in font.dat: %d glyphs per section,\n", total);
-    fprintf(out, "// one byte per pixel, sections listed below.\n\n");
+    fprintf(out, "// one byte per pixel, sections listed below.\n");
+    fprintf(out, "// Baked from JetBrains Mono.\n\n");
     fprintf(out, "pub const glyph_count: usize = %d;\n\n", total);
     fprintf(out, "/// 0 = regular, 1 = bold, 2 = medium.\n");
     fprintf(out, "pub const Section = struct {\n");
-    fprintf(out, "    w: u32,\n    h: u32,\n    weight: u8,\n    offset: usize,\n};\n\n");
+    fprintf(out, "    w: u32,\n    h: u32,\n    weight: u8,\n");
+    fprintf(out, "    /// Point size this section was rasterized for, at 1x.\n");
+    fprintf(out, "    points: u32,\n    density: u32,\n    offset: usize,\n};\n\n");
     fprintf(out, "pub const sections = [_]Section{\n");
     for (int i = 0; i < nsections; i++) {
         int wi = sections[i].weight == W_REGULAR ? 0
                : sections[i].weight == W_BOLD ? 1 : 2;
-        fprintf(out, "    .{ .w = %d, .h = %d, .weight = %d, .offset = %ld },\n",
-                sections[i].w, sections[i].h, wi, sections[i].offset);
+        fprintf(out, "    .{ .w = %d, .h = %d, .weight = %d, .points = %d, .density = %d, .offset = %ld },\n",
+                sections[i].w, sections[i].h, wi, sections[i].points,
+                sections[i].density, sections[i].offset);
     }
     fprintf(out, "};\n\n");
+    fprintf(out, "/// Terminal point sizes, smallest first; the middle one is the default.\n");
+    fprintf(out, "pub const term_points = [_]u32{");
+    for (int i = 0; i < NTERM; i++) fprintf(out, " %d,", term_points[i]);
+    fprintf(out, " };\n");
+    fprintf(out, "/// The interface size that goes with each terminal size.\n");
+    fprintf(out, "pub const ui_points = [_]u32{");
+    for (int i = 0; i < NUI; i++) fprintf(out, " %d,", ui_points[i]);
+    fprintf(out, " };\n\n");
     fprintf(out, "pub const Range = struct { lo: u21, hi: u21, base: u16 };\n\n");
     fprintf(out, "pub const ranges = [_]Range{\n");
     int base = 0;

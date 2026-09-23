@@ -275,6 +275,16 @@ pub const Tabs = struct {
         return any;
     }
 
+    /// Waits briefly for the focused tab's shell to answer.
+    ///
+    /// Called straight after a keystroke: the echo then lands in the same
+    /// frame as the key press instead of the next one, which is the whole
+    /// difference between typing that feels immediate and typing that lags.
+    pub fn awaitEcho(self: *Tabs, timeout_ms: i32) void {
+        const tab = self.active() orelse return;
+        _ = tab.pty.waitReadable(timeout_ms);
+    }
+
     /// Closes tabs whose child has exited. Returns the number closed.
     pub fn reapExited(self: *Tabs) usize {
         var closed: usize = 0;
