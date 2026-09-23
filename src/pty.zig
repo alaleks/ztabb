@@ -146,6 +146,35 @@ test "the pty remembers its size and ignores a repeat of it" {
     try pty.write("x\n");
 }
 
+test "a live child is never reported as exited" {
+    // `poll` reaps with WNOHANG and now also treats "no such child" as gone,
+    // so that a pane whose shell vanished is closed rather than polled for
+    // ever. The other side of that has to hold: while the child is running,
+    // every poll must say so, or panes would close under the user.
+    var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);
+    defer pty.close();
+
+    for (0..500) |_| {
+        try testing.expect(!pty.poll());
+        try testing.expect(!pty.exited);
+        _ = pty.waitReadable(1);
+    }
+    // Still talking, which is the real proof it was alive all along.
+    try pty.write("alive\n");
+    var buf: [256]u8 = undefined;
+    var len: usize = 0;
+    for (0..2000) |_| {
+        const n = pty.read(buf[len..]) catch break;
+        if (n == 0) {
+            _ = pty.waitReadable(2);
+            continue;
+        }
+        len += n;
+        if (std.mem.indexOf(u8, buf[0..len], "alive") != null) break;
+    }
+    try testing.expect(std.mem.indexOf(u8, buf[0..len], "alive") != null);
+}
+
 test "closing a child that holds SIGHUP still returns, and still kills it" {
     // The hang-up is a request, and a program is entitled to refuse it: a
     // shell with `trap '' HUP` set, or one waiting on a foreground job that
