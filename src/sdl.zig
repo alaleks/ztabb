@@ -232,6 +232,8 @@ extern "c" fn SDL_SetWindowTitle(window: ?*Window, title: [*:0]const u8) bool;
 extern "c" fn SDL_CreateSurfaceFrom(w: c_int, h: c_int, format: u32, pixels: *anyopaque, pitch: c_int) ?*Surface;
 extern "c" fn SDL_DestroySurface(surface: ?*Surface) void;
 extern "c" fn SDL_SetWindowIcon(window: ?*Window, icon: ?*Surface) bool;
+extern "c" fn SDL_GetWindowProperties(window: ?*Window) u32;
+extern "c" fn SDL_GetPointerProperty(props: u32, name: [*:0]const u8, default_value: ?*anyopaque) ?*anyopaque;
 extern "c" fn SDL_GetClipboardText() [*:0]u8;
 extern "c" fn SDL_SetClipboardText(text: [*:0]const u8) bool;
 extern "c" fn SDL_free(mem: ?*anyopaque) void;
@@ -272,6 +274,14 @@ pub fn destroyWindow(win: ?*Window) void {
 
 pub fn setWindowTitle(win: ?*Window, title: [*:0]const u8) void {
     _ = SDL_SetWindowTitle(win, title);
+}
+
+/// The platform's own window handle, for the few things SDL does not wrap.
+/// Null on platforms where there is nothing of that name to hand back.
+pub fn getNativeWindow(win: ?*Window) ?*anyopaque {
+    const props = SDL_GetWindowProperties(win);
+    if (props == 0) return null;
+    return SDL_GetPointerProperty(props, "SDL.window.cocoa.window", null);
 }
 
 /// Sets the window's (and on macOS the Dock's) icon from ARGB pixels. The

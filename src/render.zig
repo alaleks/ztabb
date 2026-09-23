@@ -575,8 +575,13 @@ pub const Renderer = struct {
 
     // -- tab bar -----------------------------------------------------------
 
-    pub fn drawTabBar(self: *Renderer, tabs: *tabs_mod.Tabs, th: *const theme.Theme, width: f32) void {
-        const top: f32 = 0;
+    pub fn drawTabBar(
+        self: *Renderer,
+        tabs: *tabs_mod.Tabs,
+        th: *const theme.Theme,
+        width: f32,
+        top: f32,
+    ) void {
         const cw: f32 = @floatFromInt(self.cellW());
         const bar = self.tabBar(tabs.count, width);
         const bar_h = bar.height();
@@ -719,6 +724,33 @@ pub const Renderer = struct {
             at += self.uiCellW();
             _ = self.drawUiText(fitted.suffix, at, y, dim);
         }
+    }
+
+    /// Draws the title into the strip the system title bar left transparent:
+    /// a terminal mark, the active tab bright, then the program name dimmed.
+    ///
+    /// `inset` is where the window's own buttons end; the title starts there.
+    pub fn drawTitle(
+        self: *Renderer,
+        name: []const u8,
+        kind_icon: icons.Icon,
+        th: *const theme.Theme,
+        width: f32,
+        height: f32,
+        inset: f32,
+    ) void {
+        if (height <= 0) return;
+        const cw: f32 = @floatFromInt(self.cellW());
+        self.fill(0, 0, width, height, th.tab_bar_bg);
+
+        const icon = self.iconDrawSize() * 0.8;
+        var at = inset + cw / 2;
+        self.drawIcon(kind_icon, at, 0, icon, height, th.ansi[4], 0.8);
+        at += icon + cw / 3;
+
+        const y = self.uiTextY(0, height);
+        at += self.drawUiText(name, at, y, th.tab_active_fg);
+        _ = self.drawUiText(" / ztabb", at, y, th.tab_inactive_fg);
     }
 
     /// Geometry of the host picker, shared by drawing and mouse hit testing.

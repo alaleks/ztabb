@@ -8,6 +8,7 @@ const theme = @import("theme");
 const ssh = @import("ssh");
 const rnd = @import("render");
 const appicon = @import("appicon");
+const macos = @import("macos");
 const font = @import("font");
 
 const log = std.log.scoped(.ztabb);
@@ -57,6 +58,10 @@ pub const App = struct {
 
     theme_kind: theme.Kind,
     highlight_enabled: bool = true,
+    /// The transparent title strip: its height in window points as the
+    /// platform reports it, and in backbuffer pixels for drawing.
+    title_points: f32 = 0,
+    title_h: f32 = 0,
     /// Terminal font size in points; the interface follows it a step down.
     font_points: u32 = font.default_points,
     dpi_scale: u32 = 1,
@@ -114,6 +119,9 @@ pub const App = struct {
         errdefer renderer.deinit();
 
         setAppIcon(gpa, window);
+        // The frame, its buttons and their behaviour stay the platform's; only
+        // the title text moves under ztabb's control.
+        const title_points = macos.useTransparentTitlebar(sdl.getNativeWindow(window));
         sdl.startTextInput(window);
 
         // A missing or unreadable ~/.ssh/config is normal, not an error.
@@ -132,6 +140,7 @@ pub const App = struct {
             .hosts = hosts,
             .theme_kind = theme.fromEnv(),
         };
+        app.title_points = title_points;
         app.measure();
         _ = try app.tabs.addShell(app.cols, app.rows);
         return app;
@@ -188,7 +197,10 @@ pub const App = struct {
 
         const cw: i32 = @intCast(self.renderer.cellW());
         const ch: i32 = @intCast(self.renderer.cellH());
-        const chrome = ch * @as(i32, @intCast(rnd.TAB_BAR_CELLS));
+        // The content now runs behind the title bar, so that strip has to be
+        // left clear of the grid.
+        self.title_h = @round(self.title_points * @as(f32, @floatFromInt(self.dpi_scale)));
+        const chrome = ch * @as(i32, @intCast(rnd.TAB_BAR_CELLS)) + @as(i32, @intFromFloat(self.title_h));
         self.cols = @intCast(@max(1, @divTrunc(px_w, cw)));
         self.rows = @intCast(@max(1, @divTrunc(px_h - chrome, ch)));
     }
@@ -372,8 +384,11 @@ pub const App = struct {
             return;
         }
 
+        // The title strip belongs to the window: clicks there drag it.
+        if (y < self.title_h) return;
+
         const bar = self.renderer.tabBar(self.tabs.count, @floatFromInt(self.win_w));
-        switch (bar.hit(x, y)) {
+        switch (bar.hit(x, y - self.title_h)) {
             .new_tab => self.newShellTab(),
             .ssh_menu => self.openPicker(),
             .tab => |i| self.tabs.switchTo(i) catch {},
@@ -536,9 +551,18 @@ pub const App = struct {
 
         const width: f32 = @floatFromInt(self.win_w);
         const height: f32 = @floatFromInt(self.win_h);
-        const bar_h: f32 = @floatFromInt(self.renderer.cellH() * rnd.TAB_BAR_CELLS);
+        const bar_h = self.title_h + @as(f32, @floatFromInt(self.renderer.cellH() * rnd.TAB_BAR_CELLS));
 
-        self.renderer.drawTabBar(&self.tabs, th_, width);
+        const active = self.tabs.active();
+        self.renderer.drawTitle(
+            if (active) |tab| tab.labelParts().name else "ztabb",
+            if (active) |tab| (if (tab.kind == .ssh) .remote else .terminal) else .terminal,
+            th_,
+            width,
+            self.title_h,
+            macos.trafficLightsWidth() * @as(f32, @floatFromInt(self.dpi_scale)),
+        );
+        self.renderer.drawTabBar(&self.tabs, th_, width, self.title_h);
 
         if (self.tabs.active()) |tab| {
             var text_buf: [512]u8 = undefined;

@@ -20,6 +20,10 @@ pub fn build(b: *std.Build) void {
     const icons_mod = mod(b, "src/icons.zig", target, optimize);
     const appicon_mod = mod(b, "src/appicon.zig", target, optimize);
     const png_mod = mod(b, "src/png.zig", target, optimize);
+    const macos_mod = mod(b, "src/macos.zig", target, optimize);
+    // The Objective-C runtime, for the handful of window calls SDL does not
+    // wrap. Nothing else in the project touches it.
+    if (target.result.os.tag.isDarwin()) macos_mod.linkSystemLibrary("objc", .{});
     const pty_mod = mod(b, "src/pty.zig", target, optimize);
     // openpty and login_tty live in libutil on Linux and the BSDs; on macOS
     // they are part of libc, which is already linked.
@@ -57,6 +61,7 @@ pub fn build(b: *std.Build) void {
     app_mod.addImport("ssh", ssh_mod);
     app_mod.addImport("render", render_mod);
     app_mod.addImport("appicon", appicon_mod);
+    app_mod.addImport("macos", macos_mod);
     app_mod.addImport("font", font_mod);
 
     const main_mod = mod(b, "src/main.zig", target, optimize);
@@ -101,6 +106,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "icons", .module = icons_mod },
         .{ .name = "appicon", .module = appicon_mod },
         .{ .name = "png", .module = png_mod },
+        .{ .name = "macos", .module = macos_mod },
         .{ .name = "terminal", .module = term_mod },
         .{ .name = "highlight", .module = highlight_mod },
         .{ .name = "ssh", .module = ssh_mod },
