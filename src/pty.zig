@@ -146,6 +146,34 @@ test "the pty remembers its size and ignores a repeat of it" {
     try pty.write("x\n");
 }
 
+test "closing a child that holds SIGHUP still returns, and still kills it" {
+    // The hang-up is a request, and a program is entitled to refuse it: a
+    // shell with `trap '' HUP` set, or one waiting on a foreground job that
+    // ignores it. `close` used to wait for such a child forever, which froze
+    // the window on the key that closes a pane and again on the way out.
+    if (!posix_only) return;
+
+    const argv = [_][*:0]const u8{ "/bin/sh", "-c", "trap '' HUP; while :; do sleep 1; done" };
+    var pty = try Pty.spawn(&argv, &.{}, 80, 24);
+    const child = pty.child;
+
+    // Give the shell time to install the trap, or it dies to the default
+    // action and proves nothing.
+    for (0..200) |_| {
+        var buf: [64]u8 = undefined;
+        _ = pty.read(&buf) catch break;
+        if (!pty.waitReadable(2)) {}
+    }
+
+    pty.close();
+    try testing.expect(pty.exited);
+    // Reaped, so the pid is no longer ours to signal. Anything else means it
+    // was left running.
+    try testing.expect(kill(child, 0) != 0);
+}
+
+extern "c" fn kill(pid: std.posix.pid_t, sig: c_int) c_int;
+
 test "spawnShell starts the user's shell and it responds" {
     var pty = try Pty.spawnShell(80, 24);
     defer pty.close();

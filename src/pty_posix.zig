@@ -66,6 +66,7 @@ const F_GETFL: c_int = posix.F.GETFL;
 const F_SETFL: c_int = posix.F.SETFL;
 const O_NONBLOCK: c_int = @bitCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
 const SIGHUP: c_int = @intFromEnum(posix.SIG.HUP);
+const SIGKILL: c_int = @intFromEnum(posix.SIG.KILL);
 const WNOHANG: c_int = 1;
 const F_OK: c_int = 0;
 
@@ -212,22 +213,72 @@ pub const Pty = struct {
     /// finished shell does not linger as a zombie for the life of the app.
     pub fn poll(self: *Pty) bool {
         if (self.exited) return true;
-        var status: c_int = 0;
-        if (libc.waitpid(self.child, &status, WNOHANG) == self.child) {
-            self.exited = true;
-            self.exit_status = @bitCast(status);
-        }
-        return self.exited;
+        return self.reap(0);
     }
 
+    /// Hangs the child up and reaps it, without ever blocking indefinitely.
+    ///
+    /// Closing the master is the hang-up a real terminal performs, and a shell
+    /// exits on it. One that does not -- a program holding SIGHUP, or a shell
+    /// waiting on a foreground job of its own -- must not be able to wedge the
+    /// window. An unbounded `waitpid` here did exactly that: the app froze on
+    /// the key that closes a pane, and again on the way out, which is what the
+    /// sampled main thread was sitting in.
+    ///
+    /// So the wait is bounded and escalates, the way the ConPTY side already
+    /// did: ask, then insist.
     pub fn close(self: *Pty) void {
         _ = libc.close(self.master);
-        if (!self.exited) {
-            // SIGHUP first, as a terminal would; the shell exits on its own.
-            _ = libc.kill(self.child, SIGHUP);
+        if (self.exited) return;
+
+        self.signal(SIGHUP);
+        if (self.reap(GRACE_MS)) return;
+        self.signal(SIGKILL);
+        // SIGKILL cannot be held off, so this is a formality -- but a bounded
+        // one, because a process stopped in the kernel still takes a moment.
+        if (self.reap(GRACE_MS)) return;
+        // Out of patience. The child is on its own; leaving it unreaped costs
+        // a zombie until ztabb exits, which is far cheaper than never
+        // returning from here.
+        self.exited = true;
+    }
+
+    /// How long a closing pane gives its shell before insisting.
+    const GRACE_MS: u32 = 200;
+    const POLL_MS: u32 = 2;
+
+    /// Signals the child's whole process group, falling back to the child
+    /// alone.
+    ///
+    /// The group matters: the process holding the terminal is usually the
+    /// shell's foreground job rather than the shell, and it is a grandchild of
+    /// ztabb's, not something we can name. The child leads a group of its own,
+    /// having been made a session leader when it was spawned.
+    fn signal(self: *Pty, sig: c_int) void {
+        if (libc.kill(-self.child, sig) == 0) return;
+        _ = libc.kill(self.child, sig);
+    }
+
+    /// Reaps the child, waiting up to `ms` for it. Returns whether it is gone.
+    fn reap(self: *Pty, ms: u32) bool {
+        var waited: u32 = 0;
+        while (true) {
             var status: c_int = 0;
-            _ = libc.waitpid(self.child, &status, 0);
-            self.exited = true;
+            const got = libc.waitpid(self.child, &status, WNOHANG);
+            if (got == self.child) {
+                self.exited = true;
+                self.exit_status = @bitCast(status);
+                return true;
+            }
+            if (got < 0) {
+                if (errno() == .INTR) continue;
+                // ECHILD: somebody already reaped it, which is just as good.
+                self.exited = true;
+                return true;
+            }
+            if (waited >= ms) return false;
+            _ = libc.usleep(POLL_MS * 1000);
+            waited += POLL_MS;
         }
     }
 };
