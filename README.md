@@ -1,244 +1,260 @@
 # ztabb
 
-ztabb — современный терминальный клиент на Zig: минимум потребления памяти, скорость и удобство.
+A terminal that stays out of the way: one small native process, a bundled
+typeface, and no runtime you have to feed.
 
-Вкладки, полноценный эмулятор VT/xterm, встроенный сглаженный шрифт, светлая и
-тёмная темы, подключения из `~/.ssh/config` и подсветка набираемой команды.
+Tabs, a VT/xterm emulator, hosts read from `~/.ssh/config`, light and dark
+themes, and syntax colouring on the line you are typing.
 
-## Требования
+## What it costs
+
+Measured on this machine, an Apple Silicon Mac, against Tabby running beside it:
+
+|                    | ztabb          | Tabby               |
+| ------------------ | -------------- | ------------------- |
+| Idle CPU           | **0.1 %**      | 14.3 %              |
+| Resident memory    | **110 MB**     | 459 MB              |
+| Processes          | **1**          | 5                   |
+| On disk            | **8.6 MB**     | 379 MB              |
+| Runtime dependency | **SDL3, libc** | Electron / Chromium |
+
+Two honest caveats. Tabby was a live instance with tabs open, not a controlled
+baseline — treat it as an order of magnitude, not a benchmark. And most of
+ztabb's 110 MB is not ztabb: an empty SDL window with a Metal renderer already
+costs 88 MB on this machine. ztabb's own share is about 23 MB, of which the font
+atlases on the GPU are the bulk.
+
+What ztabb itself holds is small and bounded:
+
+- **16 bytes** per screen cell.
+- **63 KB** for a fresh 120x34 tab — scrollback is not reserved until something
+  scrolls.
+- **4 MB** ceiling on a tab's history, whatever it is fed.
+- **Zero** allocations in the render loop.
+
+## Requirements
 
 - Zig 0.16.0
 - SDL3 (`brew install sdl3`)
 
-## Сборка и запуск
+## Build
 
 ```sh
-zig build            # собрать
-zig build run        # собрать и запустить
-zig build test       # 297 юнит-тестов
+zig build                       # build
+zig build run                   # build and run
+zig build test                  # 298 unit tests
 zig build -Doptimize=ReleaseFast
 
-zig build bundle     # собрать zig-out/ztabb.app с иконкой (macOS)
+zig build bundle                # zig-out/ztabb.app, with its icon (macOS)
 ```
 
-`zig build bundle` нужен, чтобы иконка была в Dock, Finder и Launchpad
-постоянно: macOS показывает иконку приложения только для бандла, у голого
-исполняемого файла она наследуется от терминала.
+`zig build bundle` is what puts the icon in the Dock, Finder and Launchpad:
+macOS shows an application icon for a bundle, and a bare executable borrows the
+terminal's.
 
-## Управление
+## Keys
 
-Рамка окна, его кнопки и всё их поведение — системные и не подменяются. На
-macOS меняется только то, что строка заголовка *показывает*: её собственный
-текст скрывается, содержимое окна продолжается под ней, и ztabb рисует там свой
-заголовок — значок терминала, **имя активной вкладки** ярким и ` / ztabb`
-приглушённым, тем же JetBrains Mono Medium, что и подписи вкладок. Кнопки окна
-остаются ровно там и такими, какими их рисует система. На других ОС заголовок
-обычный, системный.
+The application modifier is **Cmd** or **Ctrl+Shift** — both work everywhere, so
+there is a second option where the system claims a Cmd combination for itself.
+Plain Ctrl belongs entirely to the shell, so Ctrl+C, Ctrl+W and Ctrl+R behave as
+they always do.
 
-Вкладками можно управлять мышью: **+** открывает новую вкладку, кнопка с
-глобусом рядом раскрывает список SSH-хостов, клик по вкладке переключает на
-неё, **×** справа в вкладке закрывает её. Активная вкладка подсвечена
-градиентом с акцентом наверху.
+| Key                               | Action                               |
+| --------------------------------- | ------------------------------------ |
+| `Cmd+T` / `Cmd+N`                 | New tab                              |
+| `Cmd+W`                           | Close tab                            |
+| `Cmd+1` … `Cmd+9`                 | Go to tab by number                  |
+| `Cmd+[` / `Cmd+]`                 | Previous / next tab                  |
+| `Cmd+S`                           | SSH host list                        |
+| `Cmd+D`                           | Toggle light / dark                  |
+| `Cmd+L`                           | Toggle command colouring             |
+| `Cmd+=` / `Cmd+-` / `Cmd+0`       | Font size: up / down / back to 13 pt |
+| `Cmd+C` / `Cmd+V`                 | Copy current line / paste            |
+| `Shift+PageUp` / `Shift+PageDown` | Scroll history                       |
+| Mouse wheel                       | Scroll history                       |
 
-Клавиша приложения — **Cmd** или **Ctrl+Shift**; обе работают на всех
-системах, так что есть запасной вариант там, где сочетание с Cmd перехватывает
-сама ОС. Обычный Ctrl целиком отдан шеллу, поэтому Ctrl+C, Ctrl+W и Ctrl+R
-работают как всегда.
+No binding uses Shift as an extra modifier: under the Ctrl+Shift form it is
+already spoken for, and such a combination would be unreachable there.
 
-| Сочетание | Действие |
-| --- | --- |
-| `Cmd+T` / `Cmd+N` | Новая вкладка |
-| `Cmd+W` | Закрыть вкладку |
-| `Cmd+1` … `Cmd+9` | Перейти к вкладке по номеру |
-| `Cmd+[` / `Cmd+]` | Предыдущая / следующая вкладка |
-| `Cmd+S` | Список SSH-хостов |
-| `Cmd+D` | Переключить светлую/тёмную тему |
-| `Cmd+L` | Включить/выключить подсветку команд |
-| `Cmd+=` / `Cmd+-` / `Cmd+0` | Размер шрифта: больше / меньше / сбросить на 13 pt |
-| `Cmd+C` / `Cmd+V` | Копировать текущую строку / вставить |
-| `Shift+PageUp` / `Shift+PageDown` | Листать историю |
-| Колесо мыши | Листать историю |
+Mouse: **+** opens a tab, the globe beside it drops down the SSH hosts, a click
+selects a tab, **×** closes one.
 
-Ни одно сочетание не использует Shift как дополнительный модификатор: в форме
-`Ctrl+Shift` он уже занят, и такая комбинация была бы недостижима.
+`ZTABB_THEME=light ztabb` opens in the light theme.
 
-Тему при запуске можно задать переменной окружения: `ZTABB_THEME=light ztabb`.
+## Why it is small
 
-## Возможности
+**One process, no web stack.** The renderer is SDL3 talking to Metal; there is
+no browser engine, no JavaScript runtime and no IPC between helper processes.
+The binary links against SDL3 and libc, and nothing else.
 
-**Эмулятор терминала.** Разбор escape-последовательностей построен как
-конечный автомат, поэтому последовательность или UTF-8 символ, разорванные
-границей чтения из pty, собираются корректно. Поддержаны перемещение курсора,
-ED/EL, вставка и удаление строк и символов, области прокрутки (DECSTBM),
-альтернативный экран (для `vim`, `less`, `htop`), DECTCEM, DECSC/DECRC,
-заголовок окна через OSC 0/1/2, SGR-атрибуты, 256 цветов и truecolor.
+**Glyphs are batched by colour.** A colour change flushes SDL's batch, and
+setting one per glyph cost 9800 flushes a frame on a full window of ordinary
+single-colour output, where 49 suffice. Runs sharing a colour and weight are
+drawn together.
 
-**Шрифт.** Встроен **JetBrains Mono** со сглаживанием (8 бит на пиксель).
-Размер по умолчанию — 13 pt, `Cmd+=` и `Cmd+-` переключают на 11 и 16 pt,
-`Cmd+0` возвращает к 13. Клетка построена по метрикам самой гарнитуры:
-0.60em в ширину и 1.32em в высоту, то есть полный ascent с descent, чтобы
-хвосты букв не срезались.
+**Frames are drawn only when something changed**, and the poll interval backs
+off while nothing does — which is why an idle window costs a tenth of a percent
+of a core rather than sixty redraws a second of a motionless prompt. A keystroke
+wakes it immediately.
 
-Каждый размер запечён отдельно под 1x и под 2x, причём набор 2x — ровно вдвое
-больше 1x, а не растянутый: растянутый теряет сглаживание, и текст выглядит как
-отпечатанный на машинке.
+**A typed character lands in the frame it was typed in.** After a key press the
+loop waits briefly for the shell's echo before drawing, rather than showing it a
+frame later.
 
-Текст интерфейса — подписи вкладок, диалоги — набран настоящим начертанием
-Medium и на ступень мельче терминального: на мелком кегле Regular выцветает, а
-Bold выглядит грубо.
+**History is bounded by bytes, not just rows.** A row cap alone does not hold:
+on a wide window every row is expensive, so a tab left on `tail -f` would keep
+tens of megabytes for the session. At the ceiling the ring evicts its oldest row
+one at a time, so scrollback depth stays constant instead of collapsing by half
+periodically. On a 200x50 window the history settles at 4 MB after about five
+thousand lines and stays there through half a million.
 
-Покрыты латиница, кириллица, Latin-1, стрелки, псевдографика, блочные символы,
-Powerline и прочие знаки — 1067 глифов.
+**Nothing is allocated per frame.** The SSH list, the labels and the highlighter
+all work in fixed buffers.
 
-**Устанавливать JetBrains Mono не нужно.** Глифы лежат байтами внутри
-исполняемого файла (`@embedFile`), в рантайме шрифт ниоткуда не подгружается, и
-бинарник слинкован только с SDL3 и libSystem — ни CoreText, ни fontconfig, ни
-freetype. На машине без этой гарнитуры всё выглядит точно так же. Сама
-гарнитура нужна только для перезапекания `font.dat`, и генератор откажется
-работать, если её нет, вместо того чтобы молча взять подмену от системы.
+## The terminal
 
-Отдельно поддержаны **Powerline-символы** (U+E0A0–U+E0B3), которыми рисуют
-приглашение `agnoster`, `powerlevel10k` и подобные темы. Разделители строятся
-геометрически, а не берутся из шрифта: только так они совпадают пиксель в
-пиксель с соседними клетками и между сегментами приглашения не появляется шва.
-Ставить Nerd Font не нужно.
+The escape parser is a state machine, so a sequence or a UTF-8 code point split
+across a pty read is reassembled rather than mangled. Cursor movement, ED/EL,
+insert and delete of lines and characters, scrolling regions (DECSTBM), the
+alternate screen (`vim`, `less`, `htop`), DECTCEM, DECSC/DECRC, window title via
+OSC 0/1/2, SGR attributes, 256 colours and truecolor.
 
-Внешних шрифтовых библиотек нет.
+Scrollback survives a resize: rows are re-laid at the new width, clipped or
+padded. Lines are not re-wrapped, as in most terminals.
 
-**Иконки.** Рисуются из signed distance fields под точный размер клетки, а не
-берутся из шрифта: символы `+`, `×` и `▾` привязаны к его метрикам, стоят на
-базовой линии для букв и читаются как пунктуация, а не как элементы управления.
-Обводки — капсулы, поэтому концы и стыки скруглены, а их толщина подобрана под
-штрих шрифта интерфейса, чтобы иконка и подпись рядом читались как одно целое.
-По вертикали подпись выравнивается по **полосе прописных**, а не по клетке:
-клетка вмещает весь шрифтовой бокс, и запас над заглавными не уравновешен
-снизу, отчего текст вставал ниже иконки рядом.
-Размер иконок тоже задан от высоты этого шрифта, а не от высоты панели.
-Поскольку это формулы, а не картинки, иконки выглядят одинаково на любом экране.
+## The typeface
 
-**Иконка приложения.** Тоже рисуется формулами: скруглённый квадрат на тёмном
-фоне терминала, с тонкой светлой кромкой, чтобы не растворяться в тёмном Dock,
-и бирюзовым приглашением внутри — контраст метки к фону 7.9:1, с запасом к
-порогу читаемости, потому что на 16 px метке помогать нечем. macOS запрашивает иконку в
-десятке размеров, от 16 px в списке до 1024 px в Finder, и один растр,
-масштабированный на все, сверху мылит, а снизу разваливается; здесь каждый
-размер отрисован в своём разрешении. `zig build icon` собирает `.icns`,
-`zig build bundle` — сам бандл. Пока программа запущена, иконка ставится и
-на ходу через `SDL_SetWindowIcon`.
+**JetBrains Mono is built in** — 1067 glyphs, no installation and no font
+library. Glyphs live in the executable as antialiased coverage maps, and the
+binary links no font machinery at all.
 
-**Темы.** Тёмная и светлая в духе JetBrains Gerry: мягкий сине-серый фон вместо
-почти-чёрного и приглушённые акценты. Ячейки экрана хранят *индексы палитры*, а
-не готовый RGB, поэтому смена темы перекрашивает и уже выведенный текст.
-Контраст обеих тем проверяется тестами по WCAG AA.
+Default size is 13 pt; `Cmd+=` and `Cmd+-` step to 11 and 16. The cell follows
+the typeface's own metrics: 0.60 em wide by 1.32 em tall, the full ascent plus
+descent, so descenders are not clipped. Every size is baked at 1x and again at
+exactly 2x — a bitmap stretched onto a denser backbuffer loses the antialiasing
+that makes small text legible.
 
-**SSH.** `~/.ssh/config` разбирается при запуске: алиасы, `HostName`, `User`,
-`Port`, `IdentityFile`, несколько алиасов в одной строке `Host`, форма
-`Ключ=значение`, `Include` на один уровень вложенности. Шаблоны вроде `Host *`
-распознаются, но в списке не показываются — это значения по умолчанию, а не
-адрес для подключения.
+Interface text — tab labels, dialogs — is set in the real Medium face, a step
+smaller than the terminal: at that size Regular goes faint and Bold goes heavy.
+It is aligned on the **cap band** rather than the cell, because the cell carries
+the whole font box and the room above the capitals is not matched below, which
+sets a label low beside the icon next to it.
 
-Список открывается кнопкой **▾** рядом с «+» или по `Cmd+S`. Выбор — стрелками
-или мышью, `Enter` или клик подключает, `Esc` закрывает; длинный список
-прокручивается. Выбранный хост запускается как `ssh <алиас>` в новой вкладке,
-и она получает имя этого хоста.
+Coverage includes Latin, Cyrillic, Latin-1, arrows, box drawing, block elements
+and **Powerline** (U+E0A0–U+E0B3), so `agnoster` and `powerlevel10k` prompts
+render without a Nerd Font. The separators are drawn geometrically rather than
+taken from the face: only exact geometry tiles with the cells either side of it
+without a seam.
 
-Ключами, агентом, `ProxyJump` и `Match`-блоками занимается сам `ssh`: ztabb
-передаёт ему только алиас и ничего из конфига не переопределяет — поэтому всё,
-что работает в `ssh <алиас>` в обычном терминале, работает и здесь.
+## Icons
 
-**Подсветка команд.** Шелл сам владеет строкой ввода, поэтому ztabb не
-вмешивается в поток байтов, а подкрашивает ячейки при отрисовке: находит конец
-приглашения (`$ `, `% `, `# `, `> `, `❯ `) и раскрашивает команду, встроенные
-команды, ключи, строки, пути, переменные, операторы и комментарии. На
-альтернативном экране и при листании истории подсветка отключается.
+Interface icons are signed distance fields evaluated at the exact size they are
+drawn, not bitmaps. Strokes are capsules, so caps and joins are round, and their
+weight is matched to the interface face's stem so an icon and the label beside
+it read as one piece. Being formulas rather than pictures, they are identical on
+every display.
 
-## Архитектура
+The application icon is drawn the same way: a rounded square on the terminal's
+own dark ground with a hairline rim, so it does not dissolve into a dark Dock,
+and a teal prompt holding 7.6:1 against it — at 16 px the mark has nothing else
+helping it. macOS asks for a dozen sizes, and each is rendered at its own
+resolution instead of scaled from one master.
+
+## Themes
+
+Light and dark in the spirit of JetBrains' Gerry: a soft blue-grey ground rather
+than near-black, with muted accents. Screen cells store **palette indices**, not
+resolved RGB, so switching the theme recolours text already on screen. Every
+pairing is checked against WCAG in the tests; body text holds 8.8:1 and the
+weakest ANSI colour 4.3:1.
+
+## SSH
+
+`~/.ssh/config` is parsed at startup: aliases, `HostName`, `User`, `Port`,
+`IdentityFile`, several aliases on one `Host` line, the `Key=value` form, and
+`Include` one level deep. Wildcards such as `Host *` are recognised but not
+listed — they are defaults, not somewhere to connect.
+
+The globe button or `Cmd+S` opens the list; arrows or the mouse choose, Enter or
+a click connects, Esc closes. The chosen host is started as `ssh <alias>` in a
+new tab, and the tab takes that name — the remote shell's own title does not
+bury which connection it is.
+
+Keys, the agent, `ProxyJump` and `Match` blocks are `ssh`'s business: ztabb
+passes the alias and overrides nothing, so whatever works as `ssh <alias>` in
+another terminal works here.
+
+## Command colouring
+
+The shell owns its input line, so ztabb does not touch the byte stream — it
+colours cells at draw time. It finds the end of the prompt (`$ `, `% `, `# `,
+`> `, `❯ `) and colours the command, builtins, options, strings, paths,
+variables, operators and comments. It stands aside on the alternate screen and
+while the history is scrolled.
+
+## Layout
 
 ```
 src/
-├── main.zig        точка входа
-├── app.zig         окно, цикл событий, раскладка клавиш
-├── render.zig      отрисовка сетки, панели вкладок, оверлеев
-├── terminal.zig    модель экрана и разбор escape-последовательностей
-├── pty.zig         pty и дочерний процесс
-├── tabs.zig        список вкладок
-├── theme.zig       светлая и тёмная палитры
-├── highlight.zig   лексер командной строки
-├── ssh.zig         разбор ~/.ssh/config
-├── font.zig        доступ к запечённому шрифту и сборка атласа
-├── icons.zig       иконки интерфейса из signed distance fields
-├── appicon.zig     иконка приложения
-├── png.zig         минимальный писатель PNG для сборки .icns
-├── macos.zig       прозрачная строка заголовка (только macOS)
-├── font_data.zig   сгенерировано: метрики и таблица диапазонов
-└── font.dat        сгенерировано: 8-битное покрытие глифов
-tools/genfont.c     генератор шрифта (нужен только при его перезапекании)
-tools/mkiconset.zig рендер .iconset для iconutil
-tools/bundle.sh     сборка ztabb.app
+├── main.zig        entry point
+├── app.zig         window, event loop, key bindings
+├── render.zig      grid, tab bar, overlays
+├── terminal.zig    screen model and escape parser
+├── pty.zig         pty and child process
+├── tabs.zig        tab list
+├── theme.zig       light and dark palettes
+├── highlight.zig   command-line lexer
+├── ssh.zig         ~/.ssh/config parser
+├── font.zig        baked typeface and atlas assembly
+├── icons.zig       interface icons from distance fields
+├── appicon.zig     application icon
+├── png.zig         minimal PNG writer, for the .icns
+├── macos.zig       transparent title bar (macOS only)
+├── font_data.zig   generated: metrics and range table
+└── font.dat        generated: 8-bit glyph coverage
+tools/
+├── genfont.c       typeface generator (only to re-bake it)
+├── mkiconset.zig   renders the .iconset for iconutil
+└── bundle.sh       assembles ztabb.app
 ```
 
-Каждый модуль собирается и тестируется отдельно: `zig build test` прогоняет
-десять независимых наборов.
+Every module builds and tests on its own: `zig build test` runs eleven
+independent suites.
 
-### Перезапекание шрифта
+### Re-baking the typeface
 
-Нужно только если меняется набор символов или начертание. Требуется macOS
-(CoreText); результат коммитится, поэтому обычная сборка от этого не зависит.
+Only needed to change the character set or the faces. Requires macOS (CoreText)
+and JetBrains Mono installed; the result is committed, so an ordinary build
+depends on neither. The generator refuses to run if the font is missing rather
+than silently baking whatever CoreText substitutes.
 
 ```sh
 cc -O2 -o /tmp/genfont tools/genfont.c -lm \
    -framework CoreText -framework CoreGraphics -framework CoreFoundation
-/tmp/genfont                    # пишет src/font.dat и src/font_data.zig
-/tmp/genfont 0x41 0x2500        # показать глифы как ASCII-арт
+/tmp/genfont                    # writes src/font.dat and src/font_data.zig
+/tmp/genfont 0x41 0x2500        # dump glyphs as ASCII art
 ```
 
-## Производительность и память
+## Platform
 
-- Ячейка экрана занимает 16 байт. История прокрутки умножает этот размер на
-  каждую строку, поэтому раскладка полей выбрана так, чтобы не переплачивать за
-  выравнивание.
-- История не резервируется при открытии вкладки, а растёт по мере надобности:
-  вкладка, которая ничего не прокручивала, не платит за неё вовсе.
-- У истории есть **бюджет памяти** (4 МБ на вкладку), а не только лимит строк.
-  Одного лимита строк мало: на широком окне каждая строка дороже, и вкладка,
-  оставленная на `tail -f`, удержала бы десятки мегабайт до конца сессии. По
-  достижении бюджета кольцо перестаёт расти и вытесняет по одной самой старой
-  строке — на окне 200×50 история выходит на полку в 4 МБ примерно на пяти
-  тысячах строк и держится там хоть на полумиллионе.
-- При расширении окна строки дорожают, и история разом ужимается до бюджета,
-  сохраняя свежий конец. Сама история при смене ширины больше не теряется:
-  строки перекладываются на новую ширину с обрезкой или добивкой пробелами.
-- Эхо шелла ожидается до отрисовки кадра, поэтому набранный символ появляется в
-  том же кадре, что и нажатие, а не в следующем.
-- Глифы рисуются пачками по цвету. Смена цветового модификатора сбрасывает
-  батч SDL, а на обычном одноцветном выводе полного окна это 9800 сбросов на
-  кадр там, где хватает 49 — разница, которая и решает, тянет ли слабая машина.
-- Список пустых глифов считается один раз на атлас. Проверять «есть ли что
-  рисовать» перечитыванием пикселей глифа стоило миллионы чтений на кадр.
-- Константы `errno`, `O_NONBLOCK` и номера сигналов берутся из определений
-  самой платформы: у BSD и Linux они разные (`EAGAIN` — 35 против 11), и
-  зашитый набор молча ломается на другой системе.
-- Кадр перерисовывается только при изменениях, а пауза между опросами растёт,
-  пока ничего не происходит: в простое расход CPU близок к нулю, но нажатие
-  клавиши будит цикл мгновенно.
-- Отрисовка синхронизирована с частотой экрана.
-- Фон рисуется горизонтальными отрезками одного цвета, а не по ячейке.
-- Списки SSH-хостов и разбор конфига не выделяют память в цикле отрисовки.
-- Все вкладки читаются каждый кадр, поэтому фоновый шелл не встаёт на
-  заполненном буфере pty.
+Built and measured on macOS. The core — pty, terminal, tabs, fonts, themes —
+takes its constants from the platform rather than hardcoding BSD values, and
+cross-compiles to Linux; the build links `libutil` there, where `openpty` lives.
+The transparent title bar is macOS-only, and elsewhere the window keeps an
+ordinary system title.
 
 ## Roadmap
 
-- [x] Поддержка ZSH и шрифтов — `$SHELL` запускается как login-шелл с
-      `TERM=xterm-256color`; встроен сглаженный шрифт с поддержкой HiDPI
-- [x] Темизация — светлая и тёмная темы с переключением на лету
-- [x] Поддержка SSH-соединений — имена подключений из `~/.ssh/config`,
-      SSH-ключи, открытие соединения в отдельной вкладке
-- [x] Подсветка синтаксиса команд
-- [x] Powerline-символы для тем приглашения вроде `agnoster`
-- [x] Управление вкладками мышью и иконки, нарисованные геометрией
-- [x] Отдельное начертание весом 500 для интерфейса
-- [x] Иконка приложения и сборка ztabb.app
-- [x] JetBrains Mono по умолчанию, 13 pt, с переключением размера
-- [x] Бюджет памяти на историю вкладки
-- [ ] Пользовательские темы и раскладка клавиш из файла конфигурации
+- [x] ZSH and font support
+- [x] Light and dark themes, switchable live
+- [x] SSH connections from `~/.ssh/config`, with keys
+- [x] Command syntax colouring
+- [x] Powerline glyphs for `agnoster`-style prompts
+- [x] Mouse tab control and icons drawn from geometry
+- [x] Application icon and an `.app` bundle
+- [x] JetBrains Mono at 13 pt, with size steps
+- [x] Memory ceiling on a tab's history
+- [ ] Mouse selection and copying a range
+- [ ] Bracketed paste
+- [ ] Splitting a tab into panes
+- [ ] Custom themes and key bindings from a config file
