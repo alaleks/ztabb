@@ -32,6 +32,12 @@ What ztabb itself holds is small and bounded:
 - **4 MB** ceiling on a tab's history, whatever it is fed.
 - **Zero** allocations in the render loop.
 
+## Licence
+
+ztabb is MIT — see `LICENSE`. It bundles glyph data rasterized from **JetBrains
+Mono**, which is under the SIL Open Font License 1.1; `NOTICE` records that and
+`licenses/JetBrainsMono-OFL.txt` carries the terms.
+
 ## Requirements
 
 - Zig 0.16.0

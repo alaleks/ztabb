@@ -14,6 +14,10 @@ const icons = @import("icons");
 const tabs_mod = @import("tabs");
 
 pub const TAB_BAR_CELLS: u32 = 2;
+/// Breathing room around the terminal grid, in cells. Text hard against the
+/// window edge is tiring to read and hides the cursor at column zero.
+pub const PAD_X_CELLS: f32 = 0.75;
+pub const PAD_Y_CELLS: f32 = 0.5;
 /// Preferred width of a tab, in character cells.
 pub const TAB_WIDTH_CELLS: u32 = 18;
 /// A tab narrower than this loses its close button; below it there is no room
@@ -306,6 +310,15 @@ pub const Renderer = struct {
         sdl.destroyTexture(old);
     }
 
+    /// The inset the grid is drawn at, in pixels.
+    pub fn padX(self: *const Renderer) f32 {
+        return @round(@as(f32, @floatFromInt(self.cellW())) * PAD_X_CELLS);
+    }
+
+    pub fn padY(self: *const Renderer) f32 {
+        return @round(@as(f32, @floatFromInt(self.cellH())) * PAD_Y_CELLS);
+    }
+
     /// The terminal cell, in backbuffer pixels.
     pub fn cellW(self: *const Renderer) u32 {
         return self.atlas_size.w;
@@ -472,11 +485,13 @@ pub const Renderer = struct {
     ) void {
         const cw: f32 = @floatFromInt(self.cellW());
         const ch: f32 = @floatFromInt(self.cellH());
+        const left = self.padX();
+        const origin = top + self.padY();
 
         for (0..t.rows) |ri| {
             const row: u32 = @intCast(ri);
             const cells = t.viewRow(row);
-            const y = top + @as(f32, @floatFromInt(row)) * ch;
+            const y = origin + @as(f32, @floatFromInt(row)) * ch;
 
             // Background first, merging horizontal runs of one colour so a
             // full-width bar costs one draw call instead of `cols` of them.
@@ -488,7 +503,7 @@ pub const Renderer = struct {
                 if (color == run_color) continue;
                 if (run_color != th.bg) {
                     self.fill(
-                        @as(f32, @floatFromInt(run_start)) * cw,
+                        left + @as(f32, @floatFromInt(run_start)) * cw,
                         y,
                         @as(f32, @floatFromInt(c - run_start)) * cw,
                         ch,
@@ -525,7 +540,7 @@ pub const Renderer = struct {
                     bound_color = fg;
                 }
 
-                const x = @as(f32, @floatFromInt(col)) * cw;
+                const x = left + @as(f32, @floatFromInt(col)) * cw;
                 self.queueGlyph(tex, cell.ch, x, y);
 
                 if (cell.attrs.underline) {
@@ -539,8 +554,8 @@ pub const Renderer = struct {
             }
         }
 
-        self.drawCursor(t, th, top);
-        self.drawScrollIndicator(t, th, top);
+        self.drawCursor(t, th, origin);
+        self.drawScrollIndicator(t, th, origin);
     }
 
     fn drawCursor(self: *Renderer, t: *const term.Terminal, th: *const theme.Theme, top: f32) void {
@@ -549,7 +564,7 @@ pub const Renderer = struct {
         if (!t.cursor_visible or t.view_offset != 0) return;
         const cw: f32 = @floatFromInt(self.cellW());
         const ch: f32 = @floatFromInt(self.cellH());
-        const x = @as(f32, @floatFromInt(t.cursor_col)) * cw;
+        const x = self.padX() + @as(f32, @floatFromInt(t.cursor_col)) * cw;
         const y = top + @as(f32, @floatFromInt(t.cursor_row)) * ch;
         self.fill(x, y, cw, ch, th.cursor);
 
@@ -564,7 +579,7 @@ pub const Renderer = struct {
         const ch: f32 = @floatFromInt(self.cellH());
         const height = @as(f32, @floatFromInt(t.rows)) * ch;
         const width = @max(2.0, cw / 4.0);
-        const x = @as(f32, @floatFromInt(t.cols)) * cw - width;
+        const x = self.padX() + @as(f32, @floatFromInt(t.cols)) * cw - width;
 
         const total: f32 = @floatFromInt(t.sb_len + t.rows);
         const thumb = @max(ch, height * @as(f32, @floatFromInt(t.rows)) / total);
@@ -832,15 +847,21 @@ pub const Picker = struct {
     height: f32,
     count: usize,
 
-    /// Rows the box shows at once; longer lists scroll.
-    pub const MAX_ROWS: usize = 14;
+    /// Rows the box will show at once, before the window's own height is
+    /// taken into account. A list that fits should not have to be scrolled.
+    pub const MAX_ROWS: usize = 32;
     const BOX_COLS: u32 = 52;
     /// Title row plus padding above and below the list.
     const CHROME_ROWS: usize = 4;
     const FIRST_ROW: f32 = 2.0;
 
     pub fn visible(self: Picker) usize {
-        return @min(self.count, MAX_ROWS);
+        // Never taller than the window it sits in, leaving space for the box's
+        // own chrome and a margin top and bottom. Clamped in floating point:
+        // a window shorter than the chrome would otherwise go negative.
+        const fits = self.height / self.cell_h - @as(f32, CHROME_ROWS + 2);
+        const room: usize = if (fits < 1) 1 else @intFromFloat(fits);
+        return @max(@min(@min(self.count, MAX_ROWS), room), 1);
     }
 
     pub fn boxW(self: Picker) f32 {
@@ -1190,19 +1211,38 @@ test "the picker box is centred and sized to its list" {
     try testing.expectEqual(@as(usize, 3), small.visible());
     try testing.expectEqual(@as(f32, 16 * 7), small.boxH()); // 3 rows + chrome
     try testing.expectEqual((800 - small.boxW()) / 2, small.boxX());
+}
 
-    // A long list stops growing and scrolls instead.
+test "a long list uses the window rather than scrolling early" {
+    // 600px of window at a 16px cell leaves room for well over the 14 rows
+    // the box used to stop at.
     const big = testPicker(100);
-    try testing.expectEqual(Picker.MAX_ROWS, big.visible());
-    try testing.expectEqual(big.boxH(), testPicker(Picker.MAX_ROWS).boxH());
+    try testing.expect(big.visible() > 14);
+    try testing.expect(big.boxH() <= 600);
+}
+
+test "the picker never grows past the window it sits in" {
+    for ([_]f32{ 200, 400, 600, 1200 }) |height| {
+        const p: Picker = .{ .cell_w = 8, .cell_h = 16, .width = 800, .height = height, .count = 500 };
+        try testing.expect(p.visible() >= 1);
+        try testing.expect(p.boxH() <= height);
+        // ...and the rows it does show all land inside the box.
+        try testing.expect(p.rowY(p.visible() - 1) + p.cell_h <= p.boxY() + p.boxH());
+    }
+}
+
+test "a tiny window still shows one row" {
+    const p: Picker = .{ .cell_w = 8, .cell_h = 16, .width = 200, .height = 40, .count = 50 };
+    try testing.expectEqual(@as(usize, 1), p.visible());
 }
 
 test "the picker scrolls to keep the selection visible" {
-    const p = testPicker(100);
+    const p: Picker = .{ .cell_w = 8, .cell_h = 16, .width = 800, .height = 600, .count = 100 };
+    const v = p.visible();
     try testing.expectEqual(@as(usize, 0), p.firstVisible(0));
-    try testing.expectEqual(@as(usize, 0), p.firstVisible(Picker.MAX_ROWS - 1));
-    try testing.expectEqual(@as(usize, 1), p.firstVisible(Picker.MAX_ROWS));
-    try testing.expectEqual(@as(usize, 86), p.firstVisible(99));
+    try testing.expectEqual(@as(usize, 0), p.firstVisible(v - 1));
+    try testing.expectEqual(@as(usize, 1), p.firstVisible(v));
+    try testing.expectEqual(100 - v, p.firstVisible(99));
 }
 
 test "clicking a row in the picker names the right host" {
@@ -1214,7 +1254,7 @@ test "clicking a row in the picker names the right host" {
 
 test "a click in a scrolled picker accounts for the offset" {
     const p = testPicker(100);
-    const selected = Picker.MAX_ROWS + 4; // scrolled down by 5
+    const selected = p.visible() + 4; // scrolled down by 5
     try testing.expectEqual(@as(usize, 5), p.hitRow(p.boxX() + 10, p.rowY(0) + 2, selected).?);
 }
 

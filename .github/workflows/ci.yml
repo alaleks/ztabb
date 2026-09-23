@@ -1,0 +1,118 @@
+# ztabb links SDL3, so a full build needs it present. macOS gets it from
+# Homebrew and runs everything; on Linux the runner images do not carry SDL3
+# yet, so that job checks the part of the tree that does not need it -- the
+# terminal, the pty, the typeface and the parsers -- which is most of the code
+# and all of the platform-sensitive code.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: "0.16.0"
+
+      - name: Install SDL3
+        run: brew install sdl3
+
+      - name: Formatting
+        run: zig fmt --check build.zig src tools/mkiconset.zig
+
+      - name: Unit tests
+        run: zig build test
+
+      # Safety checks are on in Debug and ReleaseSafe but compiled out of
+      # ReleaseFast, which is what ships. A bug that only trips an assert needs
+      # the first; one that only appears under optimisation needs the last.
+      - name: Unit tests (ReleaseSafe)
+        run: zig build test -Doptimize=ReleaseSafe
+
+      - name: Unit tests (ReleaseFast)
+        run: zig build test -Doptimize=ReleaseFast
+
+      # The bundle is how the app is actually installed, and it does more than
+      # the plain build: it renders the icon, runs iconutil, rewrites the SDL
+      # load path and re-signs. All of that can break on its own.
+      - name: Build app bundle
+        run: zig build bundle -Doptimize=ReleaseFast
+
+      - name: Check the bundle is self-contained
+        run: |
+          bin=zig-out/ztabb.app/Contents/MacOS/ztabb
+          test -f zig-out/ztabb.app/Contents/Resources/ztabb.icns
+          test -f zig-out/ztabb.app/Contents/Info.plist
+          # A Homebrew path here means the installed app breaks when the
+          # formula is upgraded or removed.
+          if otool -L "$bin" | grep -q /opt/homebrew; then
+            echo "bundle still links a Homebrew path:" >&2
+            otool -L "$bin" >&2
+            exit 1
+          fi
+          codesign -v zig-out/ztabb.app
+
+  linux:
+    name: Linux (core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: "0.16.0"
+
+      # The pty layer reads errno, O_NONBLOCK and signal numbers from the
+      # platform because the BSD and Linux values differ. Only a Linux build
+      # proves that.
+      - name: Core unit tests
+        run: zig build test-core
+
+      - name: Core unit tests (ReleaseFast)
+        run: zig build test-core -Doptimize=ReleaseFast
+
+  cross:
+    name: Cross-compile ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-linux-gnu, x86_64-macos, aarch64-macos]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: "0.16.0"
+
+      # A host build hides platform-gated code. There is no SDL3 to link
+      # against for these targets, so this compiles the core modules only.
+      # Written out rather than looped: relying on word splitting to expand a
+      # variable of arguments breaks under any shell that does not do it.
+      - name: Compile core for ${{ matrix.target }}
+        run: |
+          set -eu
+          t=${{ matrix.target }}
+          for m in font theme ssh icons appicon png pty macos; do
+            zig build-obj -target "$t" -lc -Mroot="src/$m.zig" -femit-bin=/dev/null
+          done
+          zig build-obj -target "$t" -lc \
+            --dep theme -Mroot=src/terminal.zig -Mtheme=src/theme.zig \
+            -femit-bin=/dev/null
+          zig build-obj -target "$t" -lc \
+            --dep theme -Mroot=src/highlight.zig -Mtheme=src/theme.zig \
+            -femit-bin=/dev/null
+          zig build-obj -target "$t" -lc \
+            --dep pty --dep term --dep ssh -Mroot=src/tabs.zig \
+            -Mpty=src/pty.zig \
+            --dep theme -Mterm=src/terminal.zig -Mtheme=src/theme.zig \
+            -Mssh=src/ssh.zig \
+            -femit-bin=/dev/null

@@ -1,0 +1,50 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="zlrd">
+  <title>zlrd</title>
+
+  <!--
+    Five log records, drawn the way the reader prints them: a solid badge in
+    the level colour with white text on it, then the message beside it.
+    Staggering the rows gives the stream its diagonal.
+
+    The colours are the truecolor `level` table from src/reader/theme.zig,
+    repeated here rather than approximated so the logo cannot drift away from
+    the terminal — the first version had, and was still carrying the old
+    GitHub-Dark palette that theme.zig replaced for scoring as low as 1.18:1
+    against white.
+
+      Debug  #0d5bbd    Info   #11713c    Warn  #8a5300
+      Error  #c02626    Fatal  #9c1382    muted #7b7b7b
+
+    Every one of those is a *background* tuned to carry white text at
+    5.9:1–7.4:1. Using them as thin strokes on a dark canvas throws that away,
+    which is why each badge is solid and the bar inside it is white.
+  -->
+
+  <rect width="512" height="512" rx="64" fill="#0d1117"/>
+
+  <!-- INFO -->
+  <rect x="64" y="64" width="112" height="48" rx="12" fill="#11713c"/>
+  <rect x="82" y="82" width="76" height="12" rx="6" fill="#ffffff"/>
+  <rect x="192" y="82" width="192" height="12" rx="6" fill="#7b7b7b"/>
+
+  <!-- DEBUG -->
+  <rect x="272" y="144" width="112" height="48" rx="12" fill="#0d5bbd"/>
+  <rect x="290" y="162" width="76" height="12" rx="6" fill="#ffffff"/>
+  <rect x="160" y="162" width="96" height="12" rx="6" fill="#7b7b7b" opacity="0.55"/>
+
+  <!-- WARN -->
+  <rect x="208" y="224" width="112" height="48" rx="12" fill="#8a5300"/>
+  <rect x="226" y="242" width="76" height="12" rx="6" fill="#ffffff"/>
+  <rect x="336" y="242" width="48" height="12" rx="6" fill="#7b7b7b" opacity="0.55"/>
+
+  <!-- ERROR -->
+  <rect x="144" y="304" width="112" height="48" rx="12" fill="#c02626"/>
+  <rect x="162" y="322" width="76" height="12" rx="6" fill="#ffffff"/>
+  <rect x="272" y="322" width="112" height="12" rx="6" fill="#7b7b7b" opacity="0.55"/>
+
+  <!-- FATAL — the row that ends the process, and the highest-contrast pair
+       in the palette at 7.4:1. -->
+  <rect x="64" y="400" width="112" height="48" rx="12" fill="#9c1382"/>
+  <rect x="82" y="418" width="76" height="12" rx="6" fill="#ffffff"/>
+  <rect x="192" y="418" width="192" height="12" rx="6" fill="#7b7b7b"/>
+</svg>

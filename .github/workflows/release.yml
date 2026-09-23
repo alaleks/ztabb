@@ -1,0 +1,85 @@
+# Fires on a v* tag. ztabb links SDL3 and ships as a macOS .app, so a release
+# is a pair of signed bundles rather than bare cross-compiled binaries.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 and later are Apple Silicon; macos-13 is the last Intel
+          # image, and each builds for the machine it runs on because SDL3
+          # comes from that machine's Homebrew.
+          - arch: aarch64-macos
+            os: macos-14
+          - arch: x86_64-macos
+            os: macos-13
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: "0.16.0"
+
+      - name: Install SDL3
+        run: brew install sdl3
+
+      - name: Test
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Build app bundle
+        run: zig build bundle -Doptimize=ReleaseFast
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          # Keep the bundle structure and its permissions; a zip of a .app is
+          # what macOS expects to receive.
+          (cd zig-out && ditto -c -k --keepParent ztabb.app \
+            "../dist/ztabb-${{ matrix.arch }}.zip")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.arch }}
+          path: dist/*
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.zip > checksums.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            The bundles are ad-hoc signed, not signed with a Developer ID.
+            macOS will quarantine a downloaded copy, so on first launch either
+            right-click the app and choose Open, or clear the flag:
+
+                xattr -dr com.apple.quarantine /Applications/ztabb.app

@@ -100,6 +100,16 @@ pub fn build(b: *std.Build) void {
     bundle_step.dependOn(&bundle.step);
 
     const test_step = b.step("test", "Run unit tests");
+    // Everything but the SDL-facing modules, so a machine without SDL3 can
+    // still check the terminal, the pty, the typeface and the parsers.
+    const core_step = b.step("test-core", "Run unit tests that do not need SDL3");
+
+    const core_suites = [_][]const u8{
+        "theme",    "font",      "icons", "appicon", "png",
+        "terminal", "highlight", "ssh",   "pty",     "tabs",
+        "macos",
+    };
+
     const suites = [_]struct { name: []const u8, module: *std.Build.Module }{
         .{ .name = "theme", .module = theme_mod },
         .{ .name = "font", .module = font_mod },
@@ -118,6 +128,10 @@ pub fn build(b: *std.Build) void {
     };
     for (suites) |s| {
         const t = b.addTest(.{ .name = s.name, .root_module = s.module });
-        test_step.dependOn(&b.addRunArtifact(t).step);
+        const run = &b.addRunArtifact(t).step;
+        test_step.dependOn(run);
+        for (core_suites) |core| {
+            if (std.mem.eql(u8, core, s.name)) core_step.dependOn(run);
+        }
     }
 }

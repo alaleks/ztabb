@@ -201,8 +201,11 @@ pub const App = struct {
         // left clear of the grid.
         self.title_h = @round(self.title_points * @as(f32, @floatFromInt(self.dpi_scale)));
         const chrome = ch * @as(i32, @intCast(rnd.TAB_BAR_CELLS)) + @as(i32, @intFromFloat(self.title_h));
-        self.cols = @intCast(@max(1, @divTrunc(px_w, cw)));
-        self.rows = @intCast(@max(1, @divTrunc(px_h - chrome, ch)));
+        // The grid is inset, so the padding comes out of the space it gets.
+        const pad_x = @as(i32, @intFromFloat(self.renderer.padX())) * 2;
+        const pad_y = @as(i32, @intFromFloat(self.renderer.padY())) * 2;
+        self.cols = @intCast(@max(1, @divTrunc(px_w - pad_x, cw)));
+        self.rows = @intCast(@max(1, @divTrunc(px_h - chrome - pad_y, ch)));
     }
 
     fn applyGeometry(self: *App) void {

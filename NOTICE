@@ -1,0 +1,13 @@
+ztabb bundles third-party material. The project itself is MIT (see LICENSE);
+the following is covered by its own terms and is reproduced beside it.
+
+JetBrains Mono
+  Copyright 2020 The JetBrains Mono Project Authors
+  https://github.com/JetBrains/JetBrainsMono
+  SIL Open Font License, Version 1.1 — licenses/JetBrainsMono-OFL.txt
+
+  src/font.dat holds glyph coverage maps rasterized from JetBrains Mono by
+  tools/genfont.c. They are a derivative of the font and ship inside the
+  executable, so the OFL travels with them. The OFL permits this: the
+  bitmaps are bundled with software and not sold on their own, and "ztabb"
+  is not a reserved font name.
