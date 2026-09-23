@@ -19,6 +19,7 @@ const objc = struct {
     const Sel = ?*anyopaque;
 
     extern "c" fn sel_registerName(name: [*:0]const u8) Sel;
+    extern "c" fn objc_getClass(name: [*:0]const u8) Id;
     extern "c" fn objc_msgSend() void;
 
     /// objc_msgSend has no single signature: on arm64 it must be called
@@ -29,6 +30,10 @@ const objc = struct {
 
     fn sel(comptime name: [:0]const u8) Sel {
         return sel_registerName(name.ptr);
+    }
+
+    fn class(comptime name: [:0]const u8) Id {
+        return objc_getClass(name.ptr);
     }
 };
 
@@ -78,6 +83,48 @@ fn titlebarHeight(window: objc.Id) f32 {
     return @floatCast(height);
 }
 
+/// Takes Cmd+W back from the menu bar and gives it to the application.
+///
+/// SDL installs the standard macOS menu bar, whose Window menu carries a Close
+/// item bound to Cmd+W. Cocoa offers every key press to the menu before the
+/// window sees it, so that item quietly swallowed the shortcut ztabb binds to
+/// closing a pane: the whole window shut instead, taking every other pane and
+/// tab with it.
+///
+/// Only the shortcut is removed, not the item: the Window menu still offers
+/// Close, and the frame's own close button is untouched. Cmd+Shift+W is left
+/// alone -- ztabb binds nothing to it, so there is nothing to take back.
+pub fn releaseCloseShortcut() void {
+    if (!enabled) return;
+
+    const getId = objc.msg(fn (objc.Id, objc.Sel) callconv(.c) objc.Id);
+    const getCount = objc.msg(fn (objc.Id, objc.Sel) callconv(.c) i64);
+    const itemAt = objc.msg(fn (objc.Id, objc.Sel, i64) callconv(.c) objc.Id);
+    const getSel = objc.msg(fn (objc.Id, objc.Sel) callconv(.c) objc.Sel);
+    const setId = objc.msg(fn (objc.Id, objc.Sel, objc.Id) callconv(.c) void);
+    const fromUtf8 = objc.msg(fn (objc.Id, objc.Sel, [*:0]const u8) callconv(.c) objc.Id);
+
+    const app = getId(objc.class("NSApplication"), objc.sel("sharedApplication"));
+    const menu = getId(app, objc.sel("mainMenu")) orelse return;
+    const empty = fromUtf8(objc.class("NSString"), objc.sel("stringWithUTF8String:"), "");
+    // The item is identified by what it does rather than by its title, which
+    // is localised, or by its position, which SDL is free to change.
+    const performClose = objc.sel("performClose:");
+
+    var i: i64 = 0;
+    const tops = getCount(menu, objc.sel("numberOfItems"));
+    while (i < tops) : (i += 1) {
+        const sub = getId(itemAt(menu, objc.sel("itemAtIndex:"), i), objc.sel("submenu")) orelse continue;
+        var j: i64 = 0;
+        const items = getCount(sub, objc.sel("numberOfItems"));
+        while (j < items) : (j += 1) {
+            const item = itemAt(sub, objc.sel("itemAtIndex:"), j) orelse continue;
+            if (getSel(item, objc.sel("action")) != performClose) continue;
+            setId(item, objc.sel("setKeyEquivalent:"), empty);
+        }
+    }
+}
+
 /// Where the window's own buttons end, in points, so a title drawn in the bar
 /// starts clear of them.
 pub fn trafficLightsWidth() f32 {
@@ -94,6 +141,13 @@ test "every call is inert off macOS" {
     if (enabled) return;
     try testing.expectEqual(@as(f32, 0), useTransparentTitlebar(null));
     try testing.expectEqual(@as(f32, 0), trafficLightsWidth());
+    releaseCloseShortcut();
+}
+
+test "releasing the close shortcut is safe with no menu bar yet" {
+    // Called before SDL has an application object on macOS, and on every other
+    // platform where there is no menu bar at all.
+    releaseCloseShortcut();
 }
 
 test "a null window is handled rather than dereferenced" {

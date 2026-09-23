@@ -65,7 +65,9 @@ pub const App = struct {
     title_h: f32 = 0,
     /// Terminal font size in points; the interface follows it a step down.
     font_points: u32 = font.default_points,
-    dpi_scale: u32 = 1,
+    /// Pixels per point, as the window reports it. Fractional on the
+    /// desktops that allow it, so kept as one.
+    density: f32 = 1,
 
     win_w: i32 = 0,
     win_h: i32 = 0,
@@ -148,6 +150,9 @@ pub const App = struct {
         // The frame, its buttons and their behaviour stay the platform's; only
         // the title text moves under ztabb's control.
         const title_points = macos.useTransparentTitlebar(sdl.getNativeWindow(window));
+        // Cmd+W belongs to the pane, not to the window frame; SDL's menu bar
+        // claims it by default.
+        macos.releaseCloseShortcut();
         sdl.startTextInput(window);
 
         // A missing or unreadable ~/.ssh/config is normal, not an error.
@@ -206,23 +211,23 @@ pub const App = struct {
         sdl.getRenderOutputSize(self.renderer.r, &px_w, &px_h);
         if (px_w <= 0 or px_h <= 0) sdl.getWindowSize(self.window, &px_w, &px_h);
 
-        var logical_w: i32 = 0;
-        var logical_h: i32 = 0;
-        sdl.getWindowSize(self.window, &logical_w, &logical_h);
-        // On a HiDPI display the backbuffer is larger than the window in
-        // points; scaling the cell by that ratio keeps glyphs physically the
-        // same size and pixel-aligned.
-        self.dpi_scale = densityFor(px_w, logical_w);
+        // Asked for, not derived from the backbuffer over the window size.
+        // Those are two separately-updated numbers: on WINDOW_RESIZED the
+        // size in points has already changed while the backbuffer still
+        // reports the old one, and a grid measured from that mismatched pair
+        // fits neither -- a whole frame laid out at the wrong cell count,
+        // once for every step of a drag.
+        self.density = sdl.getWindowPixelDensity(self.window);
 
         self.win_w = px_w;
         self.win_h = px_h;
-        self.renderer.setFont(self.font_points, self.dpi_scale);
+        self.renderer.setFont(self.font_points, atlasScaleFor(self.density));
 
         const cw: i32 = @intCast(self.renderer.cellW());
         const ch: i32 = @intCast(self.renderer.cellH());
         // The content now runs behind the title bar, so that strip has to be
         // left clear of the grid.
-        self.title_h = @round(self.title_points * @as(f32, @floatFromInt(self.dpi_scale)));
+        self.title_h = @round(self.title_points * self.density);
         const chrome = ch * @as(i32, @intCast(rnd.TAB_BAR_CELLS)) + @as(i32, @intFromFloat(self.title_h));
         // The grid is inset, so the padding comes out of the space it gets.
         const pad_x = @as(i32, @intFromFloat(self.renderer.padX())) * 2;
@@ -231,21 +236,36 @@ pub const App = struct {
         self.rows = @intCast(@max(1, @divTrunc(px_h - chrome - pad_y, ch)));
     }
 
-    /// The backbuffer's density: how many pixels the window gets per point.
+    /// Which baked glyph set a display of this density wants.
     ///
-    /// Rounded rather than truncated. Mid-drag the two sizes are not always
-    /// exactly a factor apart -- a 2x backbuffer one pixel short of twice the
-    /// window is enough -- and truncating there reports 1x, which swaps the
-    /// whole glyph atlas for the low-density set and swaps it back on the next
-    /// event. That is what made the text flicker while a window was resized.
-    fn densityFor(pixels: i32, points: i32) u32 {
-        if (points <= 0 or pixels <= 0) return 1;
-        const rounded = @divTrunc(pixels + @divTrunc(points, 2), points);
-        return @max(1, @as(u32, @intCast(rounded)));
+    /// Rounded, and never below 1: a fractional density has no set of its own,
+    /// and the nearer of the two reads better than the smaller of them.
+    /// Written to survive a nonsense answer, NaN included.
+    fn atlasScaleFor(density: f32) u32 {
+        if (!(density > 1)) return 1;
+        return @intFromFloat(@min(@round(density), 8));
     }
 
+    /// Re-measures, and re-lays the tabs only if that changed anything.
+    ///
+    /// Resizing a window produces two events, and the first of them carries a
+    /// backbuffer that has not caught up yet. Returning early when nothing
+    /// moved keeps that one from re-laying the grid, signalling the shell and
+    /// drawing a frame for a size the window does not have.
     fn applyGeometry(self: *App) void {
+        const was_w = self.win_w;
+        const was_h = self.win_h;
+        const was_cols = self.cols;
+        const was_rows = self.rows;
+        const was_density = self.density;
+
         self.measure();
+
+        if (self.win_w == was_w and self.win_h == was_h and
+            self.cols == was_cols and self.rows == was_rows and
+            self.density == was_density) return;
+
+        std.debug.print("RELAYOUT px={d}x{d} density={d:.2} grid={d}x{d}\n", .{ self.win_w, self.win_h, self.density, self.cols, self.rows });
         self.tabs.resizeAll(self.cols, self.rows);
         self.ui_dirty = true;
     }
@@ -277,6 +297,10 @@ pub const App = struct {
                 if (self.in_window_event) return true;
                 self.in_window_event = true;
                 defer self.in_window_event = false;
+                // An exposed window has to be repainted whether or not its
+                // geometry moved; a resize only if it did.
+                if (event.type_ == sdl.EVENT_WINDOW_EXPOSED) self.ui_dirty = true;
+                std.debug.print("WATCH ev=0x{x}\n", .{event.type_});
                 self.applyGeometry();
                 self.render();
             },
@@ -285,7 +309,22 @@ pub const App = struct {
         return true;
     }
 
+    pub fn stress(self: *App) void {
+        sdl.addEventWatch(onWindowEvent, self);
+        defer sdl.removeEventWatch(onWindowEvent, self);
+        var i: i32 = 0;
+        while (i < 40 and self.running) : (i += 1) {
+            sdl.setWindowSize(self.window, 900 + i * 25, 560 + i * 15);
+            _ = self.pumpEvents();
+            _ = self.tabs.pumpAll();
+            self.render();
+            sdl.delay(40);
+        }
+        std.debug.print("STRESS done\n", .{});
+    }
+
     pub fn run(self: *App) void {
+        if (std.c.getenv("ZTABB_STRESS") != null) return self.stress();
         // Installed here rather than in `init`: this is the first point at
         // which the app is at the address it will keep.
         sdl.addEventWatch(onWindowEvent, self);
@@ -479,7 +518,7 @@ pub const App = struct {
     /// Mouse positions arrive in window points; the grid is laid out in
     /// backbuffer pixels, so they have to be scaled on a HiDPI display.
     fn onMouseDown(self: *App, ev: sdl.MouseButtonEvent) void {
-        const scale: f32 = @floatFromInt(self.dpi_scale);
+        const scale: f32 = self.density;
         const x = ev.x * scale;
         const y = ev.y * scale;
 
@@ -579,7 +618,7 @@ pub const App = struct {
 
     fn onMouseUp(self: *App, ev: sdl.MouseButtonEvent) void {
         self.dragging = false;
-        const scale: f32 = @floatFromInt(self.dpi_scale);
+        const scale: f32 = self.density;
         const y = ev.y * scale;
         if (y >= self.chromeH() and !shiftHeld()) {
             _ = self.reportMouse(ev.button - 1, ev.x * scale, y, false);
@@ -631,7 +670,7 @@ pub const App = struct {
     /// Extends the selection while a drag is in progress.
     fn onMouseMotion(self: *App, ev: sdl.MouseMotionEvent) void {
         if (self.menu) |*m| {
-            const scale: f32 = @floatFromInt(self.dpi_scale);
+            const scale: f32 = self.density;
             const was = m.hovered;
             m.hovered = self.menuBox(m.*).hit(ev.x * scale, ev.y * scale);
             if (was != m.hovered) self.ui_dirty = true;
@@ -639,7 +678,7 @@ pub const App = struct {
         }
         if (!self.dragging) return;
         const tab = self.tabs.active() orelse return;
-        const scale: f32 = @floatFromInt(self.dpi_scale);
+        const scale: f32 = self.density;
         const at = self.renderer.cellAt(&tab.active().terminal, self.chromeH(), ev.x * scale, ev.y * scale);
         if (self.selection) |*sel| {
             sel.head_row = at.row;
@@ -668,7 +707,7 @@ pub const App = struct {
 
         // A program that asked for the mouse handles the wheel itself.
         if (p.terminal.mouse.wants()) {
-            const scale: f32 = @floatFromInt(self.dpi_scale);
+            const scale: f32 = self.density;
             const at = self.renderer.cellAt(
                 &p.terminal,
                 self.chromeH(),
@@ -904,7 +943,7 @@ pub const App = struct {
             th_,
             width,
             self.title_h,
-            macos.trafficLightsWidth() * @as(f32, @floatFromInt(self.dpi_scale)),
+            macos.trafficLightsWidth() * self.density,
         );
         self.renderer.drawTabBar(&self.tabs, th_, width, self.title_h);
 
@@ -1198,25 +1237,25 @@ fn expectKey(key: u32, mods: u16, expected: []const u8) !void {
     try testing.expectEqualSlices(u8, expected, out);
 }
 
-test "the backbuffer density rounds rather than truncates" {
-    // A window being dragged does not always report a backbuffer that is an
-    // exact multiple of its size in points. Truncating there reported 1x for
-    // what is plainly a 2x display, which swapped the glyph atlas for the
-    // low-density set and swapped it back on the next event -- the flicker.
-    try testing.expectEqual(@as(u32, 2), App.densityFor(1602, 801));
-    try testing.expectEqual(@as(u32, 2), App.densityFor(1601, 801));
-    try testing.expectEqual(@as(u32, 2), App.densityFor(1603, 801));
-    try testing.expectEqual(@as(u32, 1), App.densityFor(800, 800));
-    try testing.expectEqual(@as(u32, 3), App.densityFor(2400, 800));
+test "the glyph set follows the display's density" {
+    try testing.expectEqual(@as(u32, 1), App.atlasScaleFor(1.0));
+    try testing.expectEqual(@as(u32, 2), App.atlasScaleFor(2.0));
+    try testing.expectEqual(@as(u32, 3), App.atlasScaleFor(3.0));
+    // A fractional density has no set of its own; the nearer one reads better
+    // than the smaller one.
+    try testing.expectEqual(@as(u32, 1), App.atlasScaleFor(1.25));
+    try testing.expectEqual(@as(u32, 2), App.atlasScaleFor(1.5));
+    try testing.expectEqual(@as(u32, 2), App.atlasScaleFor(1.75));
 }
 
-test "a nonsensical window size still yields a usable density" {
-    try testing.expectEqual(@as(u32, 1), App.densityFor(0, 0));
-    try testing.expectEqual(@as(u32, 1), App.densityFor(-4, 800));
-    try testing.expectEqual(@as(u32, 1), App.densityFor(1600, 0));
-    try testing.expectEqual(@as(u32, 1), App.densityFor(1600, -800));
-    // Never below 1x, however small the backbuffer is reported to be.
-    try testing.expectEqual(@as(u32, 1), App.densityFor(1, 800));
+test "a nonsense density still yields a usable glyph set" {
+    // Whatever the window reports -- including on a backend that has nothing
+    // to say -- there has to be a set to bake.
+    try testing.expectEqual(@as(u32, 1), App.atlasScaleFor(0));
+    try testing.expectEqual(@as(u32, 1), App.atlasScaleFor(-2));
+    try testing.expectEqual(@as(u32, 1), App.atlasScaleFor(std.math.nan(f32)));
+    try testing.expectEqual(@as(u32, 8), App.atlasScaleFor(std.math.inf(f32)));
+    try testing.expectEqual(@as(u32, 8), App.atlasScaleFor(64));
 }
 
 test "no plain letter or digit is stolen from the shell" {
