@@ -267,10 +267,35 @@ static int powerlineGlyph(unsigned int cp, int w, int h, unsigned char *out) {
     return 1;
 }
 
+/// Creates a font by PostScript name, refusing a substitute.
+///
+/// CoreText answers a name it cannot find with Helvetica rather than nothing,
+/// so a machine without JetBrains Mono installed would otherwise bake a
+/// proportional face into a monospaced terminal without a word of complaint.
 static CTFontRef makeFont(const char *name, double size) {
     CFStringRef n = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
     CTFontRef f = CTFontCreateWithName(n, size, NULL);
     CFRelease(n);
+    if (!f) {
+        fprintf(stderr, "font '%s' is not installed\n", name);
+        exit(1);
+    }
+
+    CFStringRef got = CTFontCopyPostScriptName(f);
+    char actual[256] = {0};
+    CFStringGetCString(got, actual, sizeof actual, kCFStringEncodingUTF8);
+    CFRelease(got);
+
+    if (strcmp(actual, name) != 0) {
+        fprintf(stderr,
+                "font '%s' is not installed -- CoreText substituted '%s'.\n"
+                "Install it before regenerating:\n"
+                "  brew install --cask font-jetbrains-mono\n"
+                "The committed src/font.dat already carries the glyphs, so this\n"
+                "is only needed to re-bake them.\n",
+                name, actual);
+        exit(1);
+    }
     return f;
 }
 
@@ -415,6 +440,13 @@ int main(int argc, char **argv) {
         free(g);
         CFRelease(f);
         return 0;
+    }
+
+    // Check every face is really installed before touching the output: the
+    // files are committed, and a run that dies half way through would leave a
+    // truncated font.dat behind.
+    for (int bit = W_REGULAR; bit <= W_MEDIUM; bit <<= 1) {
+        CFRelease(makeFont(face_name(bit), 100));
     }
 
     FILE *dat = fopen("src/font.dat", "wb");
