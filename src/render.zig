@@ -950,12 +950,26 @@ pub const Renderer = struct {
     }
 
     /// A transient message strip at the bottom of the window.
-    pub fn drawToast(self: *Renderer, text: []const u8, th: *const theme.Theme, width: f32, height: f32) void {
-        const cw: f32 = @floatFromInt(self.cellW());
-        const ch: f32 = @floatFromInt(self.cellH());
-        const y = height - ch * 1.5;
-        self.fill(0, y, width, ch * 1.5, th.tab_bar_bg);
-        _ = self.drawUiText(text, cw, self.uiTextY(y, ch * 1.5), th.fg);
+    pub fn drawToast(
+        self: *Renderer,
+        text: []const u8,
+        th: *const theme.Theme,
+        width: f32,
+        top: f32,
+    ) void {
+        const chars = std.unicode.utf8CountCodepoints(text) catch text.len;
+        const t = Toast{
+            .cell_w = @floatFromInt(self.cellW()),
+            .cell_h = @floatFromInt(self.cellH()),
+            .ui_cell_w = self.uiCellW(),
+            .width = width,
+            .top = top,
+            .chars = chars,
+        };
+        const edge = self.hairline();
+        self.fill(t.x() - edge, t.y() - edge, t.w() + edge * 2, t.h() + edge * 2, th.tab_border);
+        self.fill(t.x(), t.y(), t.w(), t.h(), th.tab_bar_bg);
+        _ = self.drawUiText(text, t.textX(), self.uiTextY(t.y(), t.h()), th.fg);
     }
 };
 
@@ -1151,6 +1165,45 @@ pub const Menu = struct {
         if (py < first) return null;
         const i: usize = @intFromFloat((py - first) / self.rowH());
         return if (i < self.count) i else null;
+    }
+};
+
+/// Where a transient message sits.
+///
+/// A chip in the top-right of the terminal area, not a strip across the
+/// bottom: the bottom row is where the prompt and the cursor are, and a
+/// message that covers the line just typed on is worse than no message.
+pub const Toast = struct {
+    cell_w: f32,
+    cell_h: f32,
+    ui_cell_w: f32,
+    width: f32,
+    /// Top of the terminal area, below the title strip and the tab bar.
+    top: f32,
+    chars: usize,
+
+    const PAD_CELLS: f32 = 0.75;
+    const MARGIN_CELLS: f32 = 0.5;
+
+    pub fn h(self: Toast) f32 {
+        return self.cell_h * 1.5;
+    }
+
+    pub fn w(self: Toast) f32 {
+        const text = self.ui_cell_w * @as(f32, @floatFromInt(self.chars));
+        return @min(text + self.cell_w * PAD_CELLS * 2, self.width);
+    }
+
+    pub fn x(self: Toast) f32 {
+        return @max(0, self.width - self.w() - self.cell_w * MARGIN_CELLS);
+    }
+
+    pub fn y(self: Toast) f32 {
+        return self.top + self.cell_h * MARGIN_CELLS;
+    }
+
+    pub fn textX(self: Toast) f32 {
+        return self.x() + self.cell_w * PAD_CELLS;
     }
 };
 
@@ -1618,6 +1671,41 @@ test "clicks land on the right host when entries are different heights" {
     try testing.expectEqual(@as(usize, 1), p.hitRow(x, p.lineY(2) + 2, 0).?); // its second line
     try testing.expectEqual(@as(usize, 2), p.hitRow(x, p.lineY(3) + 2, 0).?);
     try testing.expect(p.hitRow(x, p.lineY(4) + 2, 0) == null);
+}
+
+fn testToast(chars: usize) Toast {
+    return .{
+        .cell_w = 8,
+        .cell_h = 16,
+        .ui_cell_w = 7,
+        .width = 800,
+        .top = 48,
+        .chars = chars,
+    };
+}
+
+test "the toast sits below the chrome, never over the last row" {
+    // The reported bug: a strip across the bottom hid the very line the
+    // prompt and the cursor are on.
+    const t = testToast(20);
+    try testing.expect(t.y() >= t.top);
+    try testing.expect(t.y() + t.h() < 300); // nowhere near a 600px window's floor
+}
+
+test "the toast is only as wide as its text and hugs the right edge" {
+    const short = testToast(6);
+    const long = testToast(40);
+    try testing.expect(long.w() > short.w());
+    try testing.expect(short.x() > long.x());
+    try testing.expect(short.x() + short.w() <= short.width);
+    try testing.expect(long.x() + long.w() <= long.width);
+    try testing.expect(short.textX() > short.x());
+}
+
+test "an absurdly long toast still fits the window" {
+    const t = testToast(10_000);
+    try testing.expectEqual(t.width, t.w());
+    try testing.expectEqual(@as(f32, 0), t.x());
 }
 
 test "a name is cut on a code point boundary, never inside one" {

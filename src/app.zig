@@ -901,7 +901,7 @@ pub const App = struct {
             self.renderer.drawMenu(self.menuBox(m), &menu_labels, &on, m.hovered, th_);
         }
         if (self.toast) |t| {
-            self.renderer.drawToast(t.buf[0..t.len], th_, width, height);
+            self.renderer.drawToast(t.buf[0..t.len], th_, width, self.chromeH());
         }
 
         sdl.renderPresent(self.renderer.r);
