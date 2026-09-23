@@ -216,7 +216,23 @@ pub const Terminal = struct {
         } else null;
         errdefer if (new_alt) |a| self.gpa.free(a);
 
-        const drop_history = c != self.cols and self.sb_rows > 0;
+        // Stored rows are width-indexed. Rather than throwing the history
+        // away on every resize -- which loses the scrollback the moment the
+        // window is dragged -- re-lay it at the new width, clipping or padding
+        // each row. Lines are not re-wrapped, which is what most terminals do.
+        const rewidth = c != self.cols and self.sb_rows > 0;
+        const new_sb: ?[]Cell = if (rewidth) blk: {
+            const sb = try self.gpa.alloc(Cell, @as(usize, self.sb_rows) * c);
+            @memset(sb, Cell.blank);
+            const keep = @min(self.cols, c);
+            for (0..self.sb_rows) |row| {
+                @memcpy(
+                    sb[row * c ..][0..keep],
+                    self.sb[row * self.cols ..][0..keep],
+                );
+            }
+            break :blk sb;
+        } else null;
 
         const copy_rows = @min(self.rows, r);
         const copy_cols = @min(self.cols, c);
@@ -229,16 +245,9 @@ pub const Terminal = struct {
             self.gpa.free(self.alt.?);
             self.alt = a;
         }
-        if (drop_history) {
-            // Stored rows are indexed by width, so a width change invalidates
-            // the whole history. Release it rather than re-reserving: it grows
-            // back on demand.
+        if (new_sb) |sb| {
             self.gpa.free(self.sb);
-            self.sb = &.{};
-            self.sb_rows = 0;
-            self.sb_head = 0;
-            self.sb_len = 0;
-            self.view_offset = 0;
+            self.sb = sb;
         }
 
         self.gpa.free(self.cells);
@@ -1114,12 +1123,18 @@ test "widening the window shrinks the history back inside the budget" {
     t.memory_budget = 512 * 1024;
     for (0..20_000) |_| t.write("x\r\n");
     const rows_before = t.sb_rows;
+    try testing.expect(rows_before > 0);
     try testing.expect(t.historyBytes() <= t.memory_budget);
 
-    // Ten times the width: every stored row now costs ten times as much.
+    // Ten times the width: every stored row now costs ten times as much, so
+    // the rows that fitted before no longer do.
     try t.resize(400, 4);
     try testing.expect(t.historyBytes() <= t.memory_budget);
     try testing.expect(t.sb_rows < rows_before);
+    try testing.expect(t.compactions > 0);
+    // What survives is the recent end of the history.
+    try testing.expect(t.sb_len > 0);
+    try testing.expectEqual(@as(u21, 'x'), t.scrollbackRow(1).?[0].ch);
 }
 
 test "the budget never squeezes the history below a usable size" {
@@ -1186,17 +1201,21 @@ test "a scrolled-back view survives a compaction" {
     for (0..t.rows) |r| _ = t.viewRow(@intCast(r));
 }
 
-test "a width change releases the history instead of re-reserving it" {
+test "history still grows on demand after a resize" {
     var t = try testTerm(5, 2);
     defer t.deinit();
     t.write("aaa\r\nbbb\r\nccc");
-    try testing.expect(t.sb_rows > 0);
+    const rows = t.sb_rows;
     try t.resize(9, 2);
-    try testing.expectEqual(@as(u32, 0), t.sb_rows);
-    try testing.expectEqual(@as(usize, 0), t.sb.len);
-    // It comes back on demand.
+    try testing.expectEqual(rows, t.sb_rows);
+
+    const before = t.sb_len;
     t.write("\r\nddd\r\neee");
-    try testing.expect(t.sb_rows > 0);
+    // The history kept what it had and went on taking more: the newest row is
+    // from after the resize, the oldest from before it.
+    try testing.expect(t.sb_len > before);
+    try testing.expectEqual(@as(u21, 'c'), t.scrollbackRow(1).?[0].ch);
+    try testing.expectEqual(@as(u21, 'a'), t.scrollbackRow(t.sb_len).?[0].ch);
 }
 
 test "init clears the grid and sets a full-screen scroll region" {
@@ -1802,14 +1821,33 @@ test "resize while on the alternate screen keeps both buffers sized" {
     t.write("\x1b[?1049l");
 }
 
-test "a width change drops scrollback rather than misreading it" {
+test "a width change keeps the scrollback, re-laid at the new width" {
+    // Dragging the window used to empty the history, which is exactly when
+    // someone is trying to see more of it.
     var t = try testTerm(5, 2);
     defer t.deinit();
     t.write("aaa\r\nbbb\r\nccc");
-    try testing.expect(t.sb_len > 0);
+    const rows = t.sb_len;
+    try testing.expect(rows > 0);
+
     try t.resize(9, 2);
-    try testing.expectEqual(@as(u32, 0), t.sb_len);
-    try testing.expect(t.scrollbackRow(1) == null);
+    try testing.expectEqual(rows, t.sb_len);
+    const row = t.scrollbackRow(1).?;
+    try testing.expectEqual(@as(usize, 9), row.len);
+    try testing.expectEqual(@as(u21, 'a'), row[0].ch);
+    try testing.expectEqual(@as(u21, ' '), row[8].ch); // padded, not garbage
+}
+
+test "narrowing clips the stored rows instead of reading past them" {
+    var t = try testTerm(10, 2);
+    defer t.deinit();
+    t.write("abcdefghij\r\nklmnopqrst\r\nz");
+    try t.resize(4, 2);
+    // One row scrolled off before the resize; it keeps its first four columns.
+    const row = t.scrollbackRow(1).?;
+    try testing.expectEqual(@as(usize, 4), row.len);
+    try testing.expectEqual(@as(u21, 'a'), row[0].ch);
+    try testing.expectEqual(@as(u21, 'd'), row[3].ch);
 }
 
 test "a height-only change preserves scrollback" {
