@@ -8,9 +8,23 @@ out=zig-out
 app="$out/ztabb.app"
 
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
 cp "$out/bin/ztabb" "$app/Contents/MacOS/ztabb"
 cp "$out/ztabb.icns" "$app/Contents/Resources/ztabb.icns"
+
+# Carry SDL3 inside the bundle and point the binary at that copy. Linking the
+# Homebrew path would leave an installed app broken the moment the formula is
+# upgraded or removed.
+sdl=$(otool -L "$app/Contents/MacOS/ztabb" | awk '/libSDL3/ {print $1; exit}')
+if [ -n "$sdl" ] && [ -f "$sdl" ]; then
+    cp "$sdl" "$app/Contents/Frameworks/"
+    name=$(basename "$sdl")
+    chmod u+w "$app/Contents/Frameworks/$name"
+    install_name_tool -change "$sdl" "@executable_path/../Frameworks/$name" \
+        "$app/Contents/MacOS/ztabb"
+    install_name_tool -id "@executable_path/../Frameworks/$name" \
+        "$app/Contents/Frameworks/$name"
+fi
 
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -31,6 +45,12 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+# Rewriting the load paths invalidates whatever signature the linker left, and
+# on Apple Silicon an unsigned binary will not start. Ad-hoc signing is enough
+# for a locally built app.
+codesign --force --sign - --timestamp=none "$app/Contents/Frameworks/"*.dylib 2>/dev/null || true
+codesign --force --sign - --timestamp=none "$app" 2>/dev/null || true
 
 # A bundle whose signature never changes keeps a stale icon in the Finder
 # cache; touching it is what makes the new one show up.

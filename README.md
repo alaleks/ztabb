@@ -52,6 +52,18 @@ zig build bundle                # zig-out/ztabb.app, with its icon (macOS)
 macOS shows an application icon for a bundle, and a bare executable borrows the
 terminal's.
 
+## Install (macOS)
+
+```sh
+zig build bundle -Doptimize=ReleaseFast
+cp -R zig-out/ztabb.app /Applications/
+```
+
+The bundle carries its own copy of SDL3 and is ad-hoc signed, so the installed
+app keeps working if Homebrew's formula is upgraded or removed. It is not
+signed with a Developer ID; a locally built app is not quarantined, so it opens
+without Gatekeeper asking, but a copy downloaded from elsewhere would be.
+
 ## Keys
 
 The application modifier is **Cmd** or **Ctrl+Shift** — both work everywhere, so
