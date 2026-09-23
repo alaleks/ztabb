@@ -924,7 +924,9 @@ pub const Terminal = struct {
             const r = levels[n / 36];
             const g = levels[(n / 6) % 6];
             const b = levels[n % 6];
-            return (r << 16) | (g << 8) | b;
+            // Tempered: the raw cube's primaries are far more saturated than
+            // anything in the theme's own palette and glare beside it.
+            return theme.temper((r << 16) | (g << 8) | b);
         }
         const v: u32 = 8 + @as(u32, i - 232) * 10;
         return (v << 16) | (v << 8) | v;

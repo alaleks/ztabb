@@ -54,7 +54,7 @@ pub const dark = Theme{
     .fg = 0xCBD1DB,
     .cursor = 0xD8DDE5,
     .cursor_text = 0x2B2E36,
-    .selection = 0x394251,
+    .selection = 0x425170,
 
     .tab_bar_bg = 0x22252C,
     .tab_active_bg = 0x333740,
@@ -92,7 +92,7 @@ pub const light = Theme{
     .fg = 0x353A42,
     .cursor = 0x353A42,
     .cursor_text = 0xFAFAFA,
-    .selection = 0xCEDDF0,
+    .selection = 0xBCD4F0,
 
     .tab_bar_bg = 0xE7E9EC,
     .tab_active_bg = 0xFAFAFA,
@@ -119,6 +119,34 @@ pub const light = Theme{
     .hl_comment = 0x767D88,
     .hl_unknown = 0x353A42,
 };
+
+/// How far a 256-colour cube entry is pulled toward its own brightness.
+///
+/// The xterm cube tops out at pure 255 primaries -- index 196 is literally
+/// #FF0000 -- which next to this palette's muted ANSI set reads as
+/// fluorescent, most visibly on the coloured badges prompts like to draw.
+const CUBE_TEMPER: f32 = 0.24;
+
+/// Takes the glare off a saturated colour without changing which colour it
+/// is: every channel moves the same fraction toward the grey of the same
+/// brightness, so the hue and the ordering of the ramp survive.
+pub fn temper(rgb: u32) u32 {
+    const r: f32 = @floatFromInt((rgb >> 16) & 0xff);
+    const g: f32 = @floatFromInt((rgb >> 8) & 0xff);
+    const b: f32 = @floatFromInt(rgb & 0xff);
+    const grey = 0.299 * r + 0.587 * g + 0.114 * b;
+    const k = CUBE_TEMPER;
+    const chan = struct {
+        fn f(x: f32, target: f32, amount: f32) u32 {
+            return @intFromFloat(@round(std.math.clamp(
+                x * (1 - amount) + target * amount,
+                0,
+                255,
+            )));
+        }
+    }.f;
+    return (chan(r, grey, k) << 16) | (chan(g, grey, k) << 8) | chan(b, grey, k);
+}
 
 /// Blends two packed colours, `t` of the way from `b` to `a`.
 pub fn mix(a: u32, b: u32, t: f32) u32 {
@@ -292,6 +320,44 @@ test "ansi palette has no duplicate entries within a brightness band" {
                 try std.testing.expect(t.ansi[i] != t.ansi[j]);
             }
         }
+    }
+}
+
+test "the selection is visible against the ground it sits on" {
+    // It used to be so close to the background that a selected range was hard
+    // to see at all, while still having to leave the text readable.
+    for ([_]Theme{ dark, light }) |t| {
+        try std.testing.expect(contrastRatio(t.selection, t.bg) >= 1.45);
+        try std.testing.expect(contrastRatio(t.fg, t.selection) >= 4.5);
+    }
+}
+
+test "tempering softens a colour without moving its hue" {
+    // Pure cube red: still unmistakably red, just not fluorescent.
+    const red = temper(0xFF0000);
+    const r = (red >> 16) & 0xff;
+    const g = (red >> 8) & 0xff;
+    const b = red & 0xff;
+    try std.testing.expect(r > g and r > b);
+    try std.testing.expectEqual(g, b); // the two low channels move together
+    try std.testing.expect(r < 0xFF); // ...and the high one came down
+    try std.testing.expect(r > 0xA0); // ...but not into brown
+
+    // Saturation falls: the gap between the channels narrows.
+    try std.testing.expect((r - g) < 0xFF);
+}
+
+test "tempering leaves greys alone and keeps the ramp in order" {
+    for ([_]u32{ 0x000000, 0x808080, 0xFFFFFF, 0x1C1C1C }) |grey| {
+        try std.testing.expectEqual(grey, temper(grey));
+    }
+    // Each step of the cube's red ramp stays brighter than the one below it.
+    const levels = [_]u32{ 0, 95, 135, 175, 215, 255 };
+    var last: f64 = -1;
+    for (levels) |v| {
+        const l = luminance(temper(v << 16));
+        try std.testing.expect(l > last);
+        last = l;
     }
 }
 
