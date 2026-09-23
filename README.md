@@ -58,7 +58,7 @@ inside `ztabb.app`. `NOTICE` spells out how each clause is met.
 ```sh
 zig build                       # build
 zig build run                   # build and run
-zig build test                  # 298 unit tests
+zig build test                  # 341 unit tests
 zig build -Doptimize=ReleaseFast
 
 zig build bundle                # zig-out/ztabb.app, with its icon (macOS)
@@ -90,11 +90,13 @@ they always do.
 | Key                               | Action                               |
 | --------------------------------- | ------------------------------------ |
 | `Cmd+T` / `Cmd+N`                 | New tab                              |
-| `Cmd+W`                           | Close tab                            |
+| `Cmd+D` / `Cmd+E`                 | Split the pane right / down          |
+| `Cmd+←` `→` `↑` `↓`               | Move focus between panes             |
+| `Cmd+W`                           | Close pane, and the tab with the last |
 | `Cmd+1` … `Cmd+9`                 | Go to tab by number                  |
 | `Cmd+[` / `Cmd+]`                 | Previous / next tab                  |
 | `Cmd+S`                           | SSH host list                        |
-| `Cmd+D`                           | Toggle light / dark                  |
+| `Cmd+Y`                           | Toggle light / dark                  |
 | `Cmd+L`                           | Toggle command colouring             |
 | `Cmd+=` / `Cmd+-` / `Cmd+0`       | Font size: up / down / back to 13 pt |
 | `Cmd+C` / `Cmd+V`                 | Copy selection or line / paste       |
@@ -104,7 +106,7 @@ they always do.
 No binding uses Shift as an extra modifier: under the Ctrl+Shift form it is
 already spoken for, and such a combination would be unreachable there.
 
-Mouse: **+** opens a tab, the globe beside it drops down the SSH hosts, a click
+Clicking a pane focuses it. Mouse: **+** opens a tab, the globe beside it drops down the SSH hosts, a click
 selects a tab, **×** closes one. Dragging over the terminal selects a range;
 `Cmd+C` copies it, falling back to the cursor's line when nothing is selected.
 Typing or switching tabs clears the selection, so what is highlighted is always
@@ -145,6 +147,20 @@ thousand lines and stays there through half a million.
 
 **Nothing is allocated per frame.** The SSH list, the labels and the highlighter
 all work in fixed buffers.
+
+## Panes
+
+A tab holds a binary tree: every leaf is a pane with its own shell, every
+branch splits its area in two. Splitting the focused pane replaces that leaf
+with a branch, so a layout can grow in any shape rather than only in rows or
+only in columns — split right, then split the right half downwards, and the
+left pane keeps its full height.
+
+Focus moves by direction, decided on the laid-out rectangles rather than by
+walking the tree: the question being asked is "what is over there", and
+geometry answers it however the splits happen to nest. Each pane has its own
+pty, history and scrollback position, and a split that would leave a pane too
+small to read a prompt in is refused rather than made.
 
 ## The terminal
 
@@ -239,6 +255,7 @@ src/
 ├── tabs.zig        tab list
 ├── theme.zig       light and dark palettes
 ├── highlight.zig   command-line lexer
+├── panes.zig       how a tab is divided
 ├── ssh.zig         ~/.ssh/config parser
 ├── font.zig        baked typeface and atlas assembly
 ├── icons.zig       interface icons from distance fields
@@ -254,7 +271,7 @@ tools/
 └── bundle.sh       assembles ztabb.app
 ```
 
-Every module builds and tests on its own: `zig build test` runs eleven
+Every module builds and tests on its own: `zig build test` runs twelve
 independent suites.
 
 ### Regenerating the artwork
@@ -301,5 +318,5 @@ ordinary system title.
 - [x] Memory ceiling on a tab's history
 - [x] Mouse selection and copying a range
 - [x] Bracketed paste
-- [ ] Splitting a tab into panes
+- [ ] хорош
 - [ ] Custom themes and key bindings from a config file

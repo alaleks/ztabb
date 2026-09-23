@@ -4,15 +4,29 @@ const std = @import("std");
 const pty = @import("pty");
 const term = @import("term");
 const ssh = @import("ssh");
+const panes = @import("panes");
 
 pub const MAX_TABS: usize = 32;
 pub const MAX_LABEL: usize = 48;
 
 pub const Kind = enum { shell, ssh };
 
-pub const Tab = struct {
+/// One shell inside a tab. A tab starts with a single pane and gains more
+/// when it is split.
+pub const Pane = struct {
     pty: pty.Pty,
     terminal: term.Terminal,
+
+    fn close(self: *Pane) void {
+        self.pty.close();
+        self.terminal.deinit();
+    }
+};
+
+pub const Tab = struct {
+    slots: [panes.MAX_PANES]?Pane = @splat(null),
+    tree: panes.Tree,
+    focused: u8 = 0,
     kind: Kind,
     /// Name set when the tab was opened; the OSC title overrides it for
     /// display when the program sets one.
@@ -48,7 +62,37 @@ pub const Tab = struct {
     /// The working directory's last component, taken from the window title the
     /// shell sets. Empty when the title carries no path.
     pub fn folderName(self: *const Tab) []const u8 {
-        return folderOf(self.terminal.titleSlice());
+        return folderOf(self.titleSlice());
+    }
+
+    fn titleSlice(self: *const Tab) []const u8 {
+        const p = self.slots[self.focused] orelse return "";
+        return p.terminal.titleSlice();
+    }
+
+    /// The pane the keyboard is talking to.
+    pub fn active(self: *Tab) *Pane {
+        return &self.slots[self.focused].?;
+    }
+
+    pub fn paneCount(self: *const Tab) usize {
+        return self.tree.count();
+    }
+
+    /// The ids of the panes this tab holds, in order.
+    pub fn paneIds(self: *const Tab, out: []u8) []u8 {
+        return self.tree.panes(out);
+    }
+
+    pub fn pane(self: *Tab, id: u8) ?*Pane {
+        if (id >= panes.MAX_PANES) return null;
+        if (self.slots[id]) |*p| return p;
+        return null;
+    }
+
+    /// The terminal the tab's name and title come from: the focused one.
+    pub fn terminalOf(self: *Tab) *term.Terminal {
+        return &self.active().terminal;
     }
 
     /// What the tab bar shows.
@@ -61,7 +105,7 @@ pub const Tab = struct {
             return .{ .name = self.profileName(), .suffix = self.folderName() };
         }
 
-        const title = self.terminal.titleSlice();
+        const title = self.titleSlice();
         const path = pathOf(title);
         if (path.len == 0) return .{ .name = self.profileName() };
 
@@ -128,7 +172,7 @@ pub fn folderOf(title: []const u8) []const u8 {
 }
 
 pub const Error = error{ TooManyTabs, InvalidIndex, NoTabs } ||
-    pty.SpawnError || std.mem.Allocator.Error;
+    panes.Error || pty.SpawnError || std.mem.Allocator.Error;
 
 pub const Tabs = struct {
     gpa: std.mem.Allocator,
@@ -136,6 +180,9 @@ pub const Tabs = struct {
     count: usize = 0,
     active_idx: usize = 0,
     scrollback_rows: u32 = term.Terminal.DEFAULT_SCROLLBACK,
+    /// The tab's area in cells, kept so a split can be laid out and each
+    /// pane's pty told its new size.
+    area: panes.Rect = .{ .w = 80, .h = 24 },
 
     pub fn init(gpa: std.mem.Allocator) Tabs {
         return .{ .gpa = gpa };
@@ -143,8 +190,10 @@ pub const Tabs = struct {
 
     pub fn deinit(self: *Tabs) void {
         for (self.items[0..self.count]) |*t| {
-            t.pty.close();
-            t.terminal.deinit();
+            for (&t.slots) |*slot| {
+                if (slot.*) |*p| p.close();
+                slot.* = null;
+            }
         }
         self.count = 0;
         self.active_idx = 0;
@@ -189,12 +238,14 @@ pub const Tabs = struct {
         const t = try term.Terminal.init(self.gpa, cols, rows, self.scrollback_rows);
 
         self.items[self.count] = .{
-            .pty = p,
-            .terminal = t,
+            .slots = @splat(null),
+            .tree = panes.Tree.single(),
+            .focused = 0,
             .kind = kind,
             .label = [_]u8{0} ** MAX_LABEL,
             .label_len = 0,
         };
+        self.items[self.count].slots[0] = .{ .pty = p, .terminal = t };
         self.items[self.count].setLabel(name);
 
         const idx = self.count;
@@ -205,8 +256,10 @@ pub const Tabs = struct {
 
     pub fn closeTab(self: *Tabs, idx: usize) Error!void {
         if (idx >= self.count) return error.InvalidIndex;
-        self.items[idx].pty.close();
-        self.items[idx].terminal.deinit();
+        for (&self.items[idx].slots) |*slot| {
+            if (slot.*) |*p| p.close();
+            slot.* = null;
+        }
 
         var i = idx;
         while (i + 1 < self.count) : (i += 1) {
@@ -261,16 +314,20 @@ pub const Tabs = struct {
         var buf: [16 * 1024]u8 = undefined;
         var any = false;
         for (self.slice()) |*t| {
-            // Bound the per-frame work so one chatty tab cannot starve the UI.
-            for (0..8) |_| {
-                const n = t.pty.read(&buf) catch {
-                    _ = t.pty.poll();
-                    break;
-                };
-                if (n == 0) break;
-                t.terminal.write(buf[0..n]);
-                any = true;
-                if (n < buf.len) break;
+            for (&t.slots) |*slot| {
+                const p = if (slot.*) |*v| v else continue;
+                // Bound the per-frame work so one chatty pane cannot starve
+                // the rest of the window.
+                for (0..8) |_| {
+                    const n = p.pty.read(&buf) catch {
+                        _ = p.pty.poll();
+                        break;
+                    };
+                    if (n == 0) break;
+                    p.terminal.write(buf[0..n]);
+                    any = true;
+                    if (n < buf.len) break;
+                }
             }
         }
         return any;
@@ -283,15 +340,24 @@ pub const Tabs = struct {
     /// difference between typing that feels immediate and typing that lags.
     pub fn awaitEcho(self: *Tabs, timeout_ms: i32) void {
         const tab = self.active() orelse return;
-        _ = tab.pty.waitReadable(timeout_ms);
+        _ = tab.active().pty.waitReadable(timeout_ms);
     }
 
     /// Closes tabs whose child has exited. Returns the number closed.
+    /// Closes panes whose shell has exited, and any tab left with none.
+    /// Returns the number of tabs closed.
     pub fn reapExited(self: *Tabs) usize {
         var closed: usize = 0;
         var i: usize = 0;
         while (i < self.count) {
-            if (self.items[i].pty.poll()) {
+            var ids: [panes.MAX_PANES]u8 = undefined;
+            var emptied = false;
+            for (self.items[i].paneIds(&ids)) |id| {
+                const p = self.items[i].pane(id) orelse continue;
+                if (!p.pty.poll()) continue;
+                if (self.closePane(i, id)) |_| {} else emptied = true;
+            }
+            if (emptied) {
                 self.closeTab(i) catch break;
                 closed += 1;
             } else {
@@ -301,13 +367,80 @@ pub const Tabs = struct {
         return closed;
     }
 
-    pub fn resizeAll(self: *Tabs, cols: u32, rows: u32) void {
-        const c: u16 = @intCast(@min(cols, std.math.maxInt(u16)));
-        const r: u16 = @intCast(@min(rows, std.math.maxInt(u16)));
-        for (self.slice()) |*t| {
-            t.terminal.resize(cols, rows) catch continue;
-            t.pty.resize(c, r);
+    /// Splits the focused pane of the active tab, starting a shell in the new
+    /// one. Returns its id.
+    pub fn splitActive(self: *Tabs, dir: panes.Dir) Error!u8 {
+        const tab = self.active() orelse return error.NoTabs;
+        const id = try tab.tree.split(tab.focused, dir, self.area);
+        errdefer _ = tab.tree.close(id);
+
+        var rects: [panes.MAX_PANES]panes.Rect = @splat(.{});
+        tab.tree.layout(self.area, &rects);
+        const r = rects[id];
+
+        var p = try pty.Pty.spawnShell(
+            @intCast(@min(r.w, std.math.maxInt(u16))),
+            @intCast(@min(r.h, std.math.maxInt(u16))),
+        );
+        errdefer p.close();
+        const t = try term.Terminal.init(self.gpa, r.w, r.h, self.scrollback_rows);
+
+        tab.slots[id] = .{ .pty = p, .terminal = t };
+        tab.focused = id;
+        self.layoutTab(tab);
+        return id;
+    }
+
+    /// Closes one pane of a tab. Returns the pane that takes focus, or null
+    /// when the tab has none left.
+    pub fn closePane(self: *Tabs, tab_idx: usize, id: u8) ?u8 {
+        const tab = &self.items[tab_idx];
+        if (tab.slots[id]) |*p| p.close();
+        tab.slots[id] = null;
+
+        const survivor = tab.tree.close(id);
+        if (survivor) |n| {
+            tab.focused = n;
+            self.layoutTab(tab);
         }
+        return survivor;
+    }
+
+    /// Closes the focused pane of the active tab, and the tab with it when
+    /// that was the only one.
+    pub fn closeActivePane(self: *Tabs) Error!void {
+        const tab = self.active() orelse return error.NoTabs;
+        if (tab.paneCount() <= 1) return self.closeTab(self.active_idx);
+        _ = self.closePane(self.active_idx, tab.focused);
+    }
+
+    /// Moves focus to whichever pane lies that way.
+    pub fn focusPane(self: *Tabs, side: panes.Side) void {
+        const tab = self.active() orelse return;
+        if (tab.tree.neighbour(tab.focused, side, self.area)) |target| {
+            tab.focused = target;
+        }
+    }
+
+    /// Resizes every pane of a tab to the rectangle the tree gives it.
+    fn layoutTab(self: *Tabs, tab: *Tab) void {
+        var rects: [panes.MAX_PANES]panes.Rect = @splat(.{});
+        tab.tree.layout(self.area, &rects);
+        for (&tab.slots, 0..) |*slot, i| {
+            const p = if (slot.*) |*v| v else continue;
+            const r = rects[i];
+            if (r.isEmpty()) continue;
+            p.terminal.resize(r.w, r.h) catch continue;
+            p.pty.resize(
+                @intCast(@min(r.w, std.math.maxInt(u16))),
+                @intCast(@min(r.h, std.math.maxInt(u16))),
+            );
+        }
+    }
+
+    pub fn resizeAll(self: *Tabs, cols: u32, rows: u32) void {
+        self.area = .{ .x = 0, .y = 0, .w = cols, .h = rows };
+        for (self.slice()) |*t| self.layoutTab(t);
     }
 };
 
@@ -330,12 +463,14 @@ fn addTestTab(tabs: *Tabs, name: []const u8, cols: u32, rows: u32) !usize {
     errdefer p.close();
     const t = try term.Terminal.init(tabs.gpa, cols, rows, 32);
     tabs.items[tabs.count] = .{
-        .pty = p,
-        .terminal = t,
+        .slots = @splat(null),
+        .tree = panes.Tree.single(),
+        .focused = 0,
         .kind = .shell,
         .label = [_]u8{0} ** MAX_LABEL,
         .label_len = 0,
     };
+    tabs.items[tabs.count].slots[0] = .{ .pty = p, .terminal = t };
     tabs.items[tabs.count].setLabel(name);
     const idx = tabs.count;
     tabs.count += 1;
@@ -472,7 +607,7 @@ test "a shell tab shows its directory under the path leading to it" {
     _ = try addTestTab(&tabs, "zsh", 80, 24);
     const tab = tabs.active().?;
 
-    tab.terminal.write("\x1b]0;~/projects/ztabb\x07");
+    tab.active().terminal.write("\x1b]0;~/projects/ztabb\x07");
     const parts = tab.labelParts();
     // The directory is what the eye should land on; the path is context.
     try testing.expectEqualStrings("ztabb", parts.name);
@@ -494,7 +629,7 @@ test "a title that is not a path is shown whole and bright" {
     defer tabs.deinit();
     _ = try addTestTab(&tabs, "zsh", 80, 24);
     const tab = tabs.active().?;
-    tab.terminal.write("\x1b]0;htop\x07");
+    tab.active().terminal.write("\x1b]0;htop\x07");
     const parts = tab.labelParts();
     try testing.expectEqualStrings("htop", parts.name);
     try testing.expectEqualStrings("", parts.prefix);
@@ -513,7 +648,7 @@ test "an ssh tab keeps showing its profile" {
     try testing.expectEqualStrings("prod", tab.displayName(&name_buf));
     try testing.expectEqualStrings("prod", tab.labelParts().name);
 
-    tab.terminal.write("\x1b]0;deploy@prod.example.com:~/app\x07");
+    tab.active().terminal.write("\x1b]0;deploy@prod.example.com:~/app\x07");
     try testing.expectEqualStrings("prod app", tab.displayName(&name_buf));
     // The profile stays the bright part; the remote directory trails it.
     try testing.expectEqualStrings("prod", tab.labelParts().name);
@@ -565,12 +700,12 @@ test "pty output reaches the tab's screen" {
     defer tabs.deinit();
     _ = try addTestTab(&tabs, "cat", 40, 8);
     const tab = tabs.active().?;
-    try tab.pty.write("hello\n");
+    try tab.active().pty.write("hello\n");
 
     var found = false;
     for (0..2000) |_| {
         _ = tabs.pumpAll();
-        if (tab.terminal.cellAt(0, 0).ch == 'h') {
+        if (tab.active().terminal.cellAt(0, 0).ch == 'h') {
             found = true;
             break;
         }
@@ -586,12 +721,12 @@ test "pumpAll drains background tabs too" {
     _ = try addTestTab(&tabs, "bg", 40, 8);
     _ = try addTestTab(&tabs, "fg", 40, 8);
     const bg = &tabs.items[0];
-    try bg.pty.write("background\n");
+    try bg.active().pty.write("background\n");
 
     var found = false;
     for (0..2000) |_| {
         _ = tabs.pumpAll();
-        if (bg.terminal.cellAt(0, 0).ch == 'b') {
+        if (bg.active().terminal.cellAt(0, 0).ch == 'b') {
             found = true;
             break;
         }
@@ -610,12 +745,14 @@ test "reapExited closes tabs whose child is gone" {
     const p = try pty.Pty.spawn(&argv, &.{}, 40, 8);
     const t = try term.Terminal.init(tabs.gpa, 40, 8, 32);
     tabs.items[1] = .{
-        .pty = p,
-        .terminal = t,
+        .slots = @splat(null),
+        .tree = panes.Tree.single(),
+        .focused = 0,
         .kind = .shell,
         .label = [_]u8{0} ** MAX_LABEL,
         .label_len = 0,
     };
+    tabs.items[1].slots[0] = .{ .pty = p, .terminal = t };
     tabs.items[1].setLabel("exits");
     tabs.count = 2;
     tabs.active_idx = 1;
@@ -629,6 +766,107 @@ test "reapExited closes tabs whose child is gone" {
     try testing.expectEqualStrings("stays", tabs.active().?.displayName(&name_buf));
 }
 
+test "splitting the focused pane starts a second shell beside it" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "one", 120, 40);
+    tabs.area = .{ .w = 120, .h = 40 };
+
+    const added = tabs.splitActive(.horizontal) catch |err| {
+        // No shell to spawn on this machine: the bookkeeping is what matters.
+        try testing.expect(err == error.OpenPtyFailed or err == error.ForkFailed);
+        return;
+    };
+    const tab = tabs.active().?;
+    try testing.expectEqual(@as(usize, 2), tab.paneCount());
+    try testing.expectEqual(added, tab.focused);
+
+    // Both panes are narrower than the tab and the same height.
+    const a = tab.pane(0).?;
+    const b = tab.pane(added).?;
+    try testing.expect(a.terminal.cols < 120);
+    try testing.expect(b.terminal.cols < 120);
+    try testing.expectEqual(a.terminal.rows, b.terminal.rows);
+}
+
+test "closing a pane hands its space back and keeps the tab" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "one", 120, 40);
+    tabs.area = .{ .w = 120, .h = 40 };
+    _ = tabs.splitActive(.vertical) catch return;
+
+    try testing.expectEqual(@as(usize, 1), tabs.count);
+    try tabs.closeActivePane();
+    try testing.expectEqual(@as(usize, 1), tabs.count); // the tab survives
+    const tab = tabs.active().?;
+    try testing.expectEqual(@as(usize, 1), tab.paneCount());
+    // The survivor is back to the full height of the tab.
+    try testing.expectEqual(@as(u32, 40), tab.active().terminal.rows);
+}
+
+test "closing the only pane closes the tab" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "one", 80, 24);
+    try tabs.closeActivePane();
+    try testing.expectEqual(@as(usize, 0), tabs.count);
+}
+
+test "focus moves between panes by direction" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "one", 120, 40);
+    tabs.area = .{ .w = 120, .h = 40 };
+    const right = tabs.splitActive(.horizontal) catch return;
+
+    const tab = tabs.active().?;
+    try testing.expectEqual(right, tab.focused);
+    tabs.focusPane(.left);
+    try testing.expectEqual(@as(u8, 0), tab.focused);
+    tabs.focusPane(.right);
+    try testing.expectEqual(right, tab.focused);
+    // Nothing that way: focus stays put rather than wrapping.
+    tabs.focusPane(.right);
+    try testing.expectEqual(right, tab.focused);
+}
+
+test "keys and output go to the focused pane only" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "one", 120, 40);
+    tabs.area = .{ .w = 120, .h = 40 };
+    const right = tabs.splitActive(.horizontal) catch return;
+
+    const tab = tabs.active().?;
+    try tab.active().pty.write("echo pane\n");
+    for (0..2000) |_| {
+        _ = tabs.pumpAll();
+        if (tab.pane(right).?.terminal.cellAt(0, 0).ch != ' ') break;
+        sleepMs(1);
+    }
+    // The other pane never saw it.
+    try testing.expectEqual(@as(u21, ' '), tab.pane(0).?.terminal.cellAt(0, 0).ch);
+}
+
+test "resizing the window re-lays every pane" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "one", 120, 40);
+    tabs.area = .{ .w = 120, .h = 40 };
+    _ = tabs.splitActive(.horizontal) catch return;
+
+    tabs.resizeAll(200, 60);
+    const tab = tabs.active().?;
+    var ids: [panes.MAX_PANES]u8 = undefined;
+    for (tab.paneIds(&ids)) |id| {
+        const p = tab.pane(id).?;
+        try testing.expectEqual(@as(u32, 60), p.terminal.rows);
+        try testing.expect(p.terminal.cols < 200);
+        try testing.expect(p.terminal.cols > 60);
+    }
+}
+
 test "resizeAll resizes every tab, not only the focused one" {
     var tabs = Tabs.init(testing.allocator);
     defer tabs.deinit();
@@ -636,8 +874,8 @@ test "resizeAll resizes every tab, not only the focused one" {
     _ = try addTestTab(&tabs, "b", 80, 24);
     tabs.resizeAll(100, 30);
     for (tabs.slice()) |*t| {
-        try testing.expectEqual(@as(u32, 100), t.terminal.cols);
-        try testing.expectEqual(@as(u32, 30), t.terminal.rows);
+        try testing.expectEqual(@as(u32, 100), t.active().terminal.cols);
+        try testing.expectEqual(@as(u32, 30), t.active().terminal.rows);
     }
 }
 

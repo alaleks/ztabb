@@ -7,6 +7,7 @@ const term = @import("term");
 const theme = @import("theme");
 const ssh = @import("ssh");
 const rnd = @import("render");
+const panes = @import("panes");
 const appicon = @import("appicon");
 const macos = @import("macos");
 const font = @import("font");
@@ -297,7 +298,7 @@ pub const App = struct {
         }
 
         const tab = self.tabs.active() orelse return;
-        tab.terminal.scrollToBottom();
+        tab.active().terminal.scrollToBottom();
         self.clearSelection();
 
         // Shift+PageUp/PageDown scroll the history rather than reaching the shell.
@@ -305,11 +306,11 @@ pub const App = struct {
             const page: i32 = @intCast(self.rows);
             switch (key) {
                 sdl.SDLK_PAGEUP => {
-                    tab.terminal.scrollView(page);
+                    tab.active().terminal.scrollView(page);
                     return;
                 },
                 sdl.SDLK_PAGEDOWN => {
-                    tab.terminal.scrollView(-page);
+                    tab.active().terminal.scrollView(-page);
                     return;
                 },
                 else => {},
@@ -321,7 +322,7 @@ pub const App = struct {
         if (bytes.len == 0) return;
         // A key that produced its own bytes must not also arrive as text.
         self.text_gate.claim();
-        tab.pty.write(bytes) catch {};
+        tab.active().pty.write(bytes) catch {};
     }
 
     fn run_action(self: *App, action: Action) void {
@@ -346,6 +347,17 @@ pub const App = struct {
             .zoom_in => self.setFontPoints(font.stepPoints(self.font_points, 1)),
             .zoom_out => self.setFontPoints(font.stepPoints(self.font_points, -1)),
             .zoom_reset => self.setFontPoints(font.default_points),
+            .split_right => self.splitPane(.horizontal),
+            .split_down => self.splitPane(.vertical),
+            .close_pane => {
+                self.tabs.closeActivePane() catch {};
+                self.clearSelection();
+                if (self.tabs.count == 0) self.running = false;
+            },
+            .focus_left => self.focusPane(.left),
+            .focus_right => self.focusPane(.right),
+            .focus_up => self.focusPane(.up),
+            .focus_down => self.focusPane(.down),
             .toggle_theme => {
                 self.theme_kind = theme.toggle(self.theme_kind);
                 self.showToast("theme: {s}", .{self.th().name});
@@ -371,8 +383,8 @@ pub const App = struct {
         if (self.picker != null) return;
         const text = ev.text orelse return;
         const tab = self.tabs.active() orelse return;
-        tab.terminal.scrollToBottom();
-        tab.pty.write(std.mem.span(text)) catch {};
+        tab.active().terminal.scrollToBottom();
+        tab.active().pty.write(std.mem.span(text)) catch {};
     }
 
     /// Mouse positions arrive in window points; the grid is laid out in
@@ -405,7 +417,12 @@ pub const App = struct {
         // Below the chrome is the terminal: a press there starts a selection.
         if (y >= self.chromeH()) {
             const tab = self.tabs.active() orelse return;
-            const at = self.renderer.cellAt(&tab.terminal, self.chromeH(), x, y);
+            // A click lands in whichever pane it fell on, and focuses it.
+            const cell = self.renderer.cellAtTab(self.chromeH(), x, y);
+            if (tab.tree.paneAt(self.tabs.area, cell.col, cell.row)) |id| {
+                tab.focused = id;
+            }
+            const at = self.renderer.cellAt(&tab.active().terminal, self.chromeH(), x, y);
             self.selection = .{
                 .anchor_row = at.row,
                 .anchor_col = at.col,
@@ -435,7 +452,7 @@ pub const App = struct {
         if (!self.dragging) return;
         const tab = self.tabs.active() orelse return;
         const scale: f32 = @floatFromInt(self.dpi_scale);
-        const at = self.renderer.cellAt(&tab.terminal, self.chromeH(), ev.x * scale, ev.y * scale);
+        const at = self.renderer.cellAt(&tab.active().terminal, self.chromeH(), ev.x * scale, ev.y * scale);
         if (self.selection) |*sel| {
             sel.head_row = at.row;
             sel.head_col = at.col;
@@ -453,7 +470,7 @@ pub const App = struct {
         const tab = self.tabs.active() orelse return;
         // Three lines per notch, the usual convention.
         const lines: i32 = @intFromFloat(@round(ev.y * 3));
-        if (lines != 0) tab.terminal.scrollView(lines);
+        if (lines != 0) tab.active().terminal.scrollView(lines);
     }
 
     // -- commands ----------------------------------------------------------
@@ -467,6 +484,23 @@ pub const App = struct {
             self.dragging = false;
             self.ui_dirty = true;
         }
+    }
+
+    fn splitPane(self: *App, dir: panes.Dir) void {
+        _ = self.tabs.splitActive(dir) catch |err| {
+            self.showToast("split: {s}", .{switch (err) {
+                error.NoRoom => "not enough room",
+                error.TooManyPanes => "too many panes",
+                else => @errorName(err),
+            }});
+            return;
+        };
+        self.clearSelection();
+    }
+
+    fn focusPane(self: *App, side: panes.Side) void {
+        self.tabs.focusPane(side);
+        self.clearSelection();
     }
 
     fn newShellTab(self: *App) void {
@@ -490,19 +524,19 @@ pub const App = struct {
         const text = sdl.getClipboardText();
         defer sdl.freeClipboardText(text);
         if (text.len == 0) return;
-        tab.terminal.scrollToBottom();
+        tab.active().terminal.scrollToBottom();
 
         // When the program asked for bracketed paste, wrap the text in the
         // markers: that is how a shell tells pasted text from typing, and why
         // pasting a command does not run it until Enter.
-        const bracketed = tab.terminal.bracketed_paste;
-        if (bracketed) tab.pty.write("\x1b[200~") catch {};
+        const bracketed = tab.active().terminal.bracketed_paste;
+        if (bracketed) tab.active().pty.write("\x1b[200~") catch {};
 
         var buf: [4096]u8 = undefined;
         var n: usize = 0;
         for (text) |c| {
             if (n == buf.len) {
-                tab.pty.write(buf[0..n]) catch {};
+                tab.active().pty.write(buf[0..n]) catch {};
                 n = 0;
             }
             // A newline is Return on the wire. Inside the markers the program
@@ -511,9 +545,9 @@ pub const App = struct {
             buf[n] = if (c == '\n') '\r' else c;
             n += 1;
         }
-        tab.pty.write(buf[0..n]) catch {};
+        tab.active().pty.write(buf[0..n]) catch {};
 
-        if (bracketed) tab.pty.write("\x1b[201~") catch {};
+        if (bracketed) tab.active().pty.write("\x1b[201~") catch {};
     }
 
     /// Copies the selection, or the cursor's line when there is none.
@@ -522,7 +556,7 @@ pub const App = struct {
         if (self.selection) |sel| {
             if (!sel.isEmpty()) {
                 var buf: [64 * 1024:0]u8 = undefined;
-                const text = term.selectedText(&tab.terminal, sel, buf[0 .. buf.len - 1]);
+                const text = term.selectedText(&tab.active().terminal, sel, buf[0 .. buf.len - 1]);
                 buf[text.len] = 0;
                 sdl.setClipboardText(@ptrCast(&buf));
                 self.showToast("copied {d} chars", .{text.len});
@@ -535,7 +569,7 @@ pub const App = struct {
     fn copyCursorLine(self: *App, tab: *tabs_mod.Tab) void {
         var buf: [1024:0]u8 = undefined;
         var n: usize = 0;
-        const t = &tab.terminal;
+        const t = &tab.active().terminal;
         for (0..t.cols) |c| {
             const cp = t.cellAt(t.cursor_row, @intCast(c)).ch;
             const len = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
@@ -630,7 +664,7 @@ pub const App = struct {
         // Redraw only when something actually changed. With vsync on, an
         // unconditional redraw would burn a GPU frame 60 times a second for a
         // window that is simply sitting at a prompt.
-        const grid_dirty = if (self.tabs.active()) |tab| tab.terminal.dirty else false;
+        const grid_dirty = if (self.tabs.active()) |tab| tab.active().terminal.dirty else false;
         if (!self.ui_dirty and !grid_dirty) return;
         self.ui_dirty = false;
 
@@ -654,16 +688,35 @@ pub const App = struct {
         self.renderer.drawTabBar(&self.tabs, th_, width, self.title_h);
 
         if (self.tabs.active()) |tab| {
-            var text_buf: [512]u8 = undefined;
-            var color_buf: [512]u32 = undefined;
-            const overlay = if (self.highlight_enabled)
-                rnd.shellLineOverlay(&tab.terminal, th_, &text_buf, &color_buf)
-            else
-                null;
-            self.renderer.drawTerminal(&tab.terminal, th_, bar_h, overlay, self.selection);
+            var rects: [panes.MAX_PANES]panes.Rect = @splat(.{});
+            tab.tree.layout(self.tabs.area, &rects);
+
+            var ids: [panes.MAX_PANES]u8 = undefined;
+            for (tab.paneIds(&ids)) |id| {
+                const p = tab.pane(id) orelse continue;
+                const focused = id == tab.focused;
+
+                var text_buf: [512]u8 = undefined;
+                var color_buf: [512]u32 = undefined;
+                // Only the focused pane gets the command colouring and the
+                // selection: both are about the line being typed.
+                const overlay = if (focused and self.highlight_enabled)
+                    rnd.shellLineOverlay(&p.terminal, th_, &text_buf, &color_buf)
+                else
+                    null;
+                self.renderer.drawPane(
+                    &p.terminal,
+                    th_,
+                    rects[id],
+                    bar_h,
+                    overlay,
+                    if (focused) self.selection else null,
+                );
+                p.terminal.dirty = false;
+                if (p.terminal.bell) p.terminal.bell = false;
+            }
+            self.drawDividers(tab, rects, bar_h, th_);
             self.updateWindowTitle(tab);
-            if (tab.terminal.bell) tab.terminal.bell = false;
-            tab.terminal.dirty = false;
         }
 
         if (self.picker) |p| {
@@ -681,6 +734,43 @@ pub const App = struct {
     /// Prefixing it with the application name produced "ztabb — dir" at the
     /// top of the window, which reads as the app talking about itself. The
     /// name of the program is already on the Dock icon and in the menu bar.
+    /// A rule between neighbouring panes. Drawn from the gaps the layout
+    /// leaves rather than from the tree, so it cannot disagree with it.
+    fn drawDividers(
+        self: *App,
+        tab: *tabs_mod.Tab,
+        rects: [panes.MAX_PANES]panes.Rect,
+        top: f32,
+        th_: *const theme.Theme,
+    ) void {
+        var ids: [panes.MAX_PANES]u8 = undefined;
+        for (tab.paneIds(&ids)) |id| {
+            const r = rects[id];
+            // The gap sits to the right of a pane, or below it, whenever a
+            // sibling starts there.
+            for (tab.paneIds(&ids)) |other| {
+                if (other == id) continue;
+                const o = rects[other];
+                if (o.x == r.x + r.w + panes.GAP and o.y < r.y + r.h and r.y < o.y + o.h) {
+                    self.renderer.drawDivider(th_, .{
+                        .x = r.x + r.w,
+                        .y = @max(r.y, o.y),
+                        .w = panes.GAP,
+                        .h = @min(r.y + r.h, o.y + o.h) - @max(r.y, o.y),
+                    }, top, true);
+                }
+                if (o.y == r.y + r.h + panes.GAP and o.x < r.x + r.w and r.x < o.x + o.w) {
+                    self.renderer.drawDivider(th_, .{
+                        .x = @max(r.x, o.x),
+                        .y = r.y + r.h,
+                        .w = @min(r.x + r.w, o.x + o.w) - @max(r.x, o.x),
+                        .h = panes.GAP,
+                    }, top, false);
+                }
+            }
+        }
+    }
+
     fn updateWindowTitle(self: *App, tab: *tabs_mod.Tab) void {
         var buf: [tabs_mod.MAX_LABEL + 16:0]u8 = undefined;
         var name_buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
@@ -732,6 +822,13 @@ pub const Action = union(enum) {
     prev_tab,
     next_tab,
     select_tab: usize,
+    split_right,
+    split_down,
+    close_pane,
+    focus_left,
+    focus_right,
+    focus_up,
+    focus_down,
     zoom_in,
     zoom_out,
     zoom_reset,
@@ -760,11 +857,21 @@ pub fn shortcutFor(key: u32, mods: u16) ?Action {
 
     return switch (key) {
         sdl.SDLK_T, sdl.SDLK_N => .new_tab,
-        sdl.SDLK_W => .close_tab,
+        // Closes the pane, and the tab with it when that was the only one --
+        // the same key for both, as terminals with panes generally do.
+        sdl.SDLK_W => .close_pane,
         sdl.SDLK_S => .ssh_picker,
         sdl.SDLK_V => .paste,
         sdl.SDLK_C => .copy_line,
-        sdl.SDLK_D => .toggle_theme,
+        sdl.SDLK_D => .split_right,
+        sdl.SDLK_E => .split_down,
+        // Arrows rather than vim keys: nothing has to be learned to find them,
+        // and the shell still gets the plain arrows.
+        sdl.SDLK_LEFT => .focus_left,
+        sdl.SDLK_RIGHT => .focus_right,
+        sdl.SDLK_UP => .focus_up,
+        sdl.SDLK_DOWN => .focus_down,
+        sdl.SDLK_Y => .toggle_theme,
         sdl.SDLK_L => .toggle_highlight,
         sdl.SDLK_LEFTBRACKET => .prev_tab,
         sdl.SDLK_RIGHTBRACKET => .next_tab,
@@ -1064,9 +1171,27 @@ test "shortcuts without the app modifier belong to the shell" {
     try testing.expect(shortcutFor(sdl.SDLK_W, sdl.KMOD_LCTRL) == null);
 }
 
+test "panes are split, closed and moved between" {
+    const gui = sdl.KMOD_LGUI;
+    try testing.expectEqual(Action.split_right, shortcutFor(sdl.SDLK_D, gui).?);
+    try testing.expectEqual(Action.split_down, shortcutFor(sdl.SDLK_E, gui).?);
+    try testing.expectEqual(Action.close_pane, shortcutFor(sdl.SDLK_W, gui).?);
+    try testing.expectEqual(Action.focus_left, shortcutFor(sdl.SDLK_LEFT, gui).?);
+    try testing.expectEqual(Action.focus_right, shortcutFor(sdl.SDLK_RIGHT, gui).?);
+    try testing.expectEqual(Action.focus_up, shortcutFor(sdl.SDLK_UP, gui).?);
+    try testing.expectEqual(Action.focus_down, shortcutFor(sdl.SDLK_DOWN, gui).?);
+}
+
+test "an arrow without the app modifier still reaches the shell" {
+    // Focus keys must not cost the shell its own cursor movement.
+    try testing.expect(shortcutFor(sdl.SDLK_LEFT, 0) == null);
+    try expectKey(sdl.SDLK_LEFT, 0, "\x1b[D");
+    try expectKey(sdl.SDLK_UP, 0, "\x1b[A");
+}
+
 test "the tab and window shortcuts map as documented" {
     const gui = sdl.KMOD_LGUI;
-    try testing.expectEqual(Action.close_tab, shortcutFor(sdl.SDLK_W, gui).?);
+    try testing.expectEqual(Action.close_pane, shortcutFor(sdl.SDLK_W, gui).?);
     try testing.expectEqual(Action.ssh_picker, shortcutFor(sdl.SDLK_S, gui).?);
     try testing.expectEqual(Action.paste, shortcutFor(sdl.SDLK_V, gui).?);
     try testing.expectEqual(Action.copy_line, shortcutFor(sdl.SDLK_C, gui).?);
@@ -1082,10 +1207,10 @@ test "the toggles work under both forms of the app modifier" {
     // A Shift variant would be unreachable under the Ctrl+Shift form, so each
     // toggle owns a key of its own.
     for ([_]u16{ sdl.KMOD_LGUI, sdl.KMOD_LCTRL | sdl.KMOD_LSHIFT }) |mods| {
-        try testing.expectEqual(Action.toggle_theme, shortcutFor(sdl.SDLK_D, mods).?);
+        try testing.expectEqual(Action.toggle_theme, shortcutFor(sdl.SDLK_Y, mods).?);
         try testing.expectEqual(Action.toggle_highlight, shortcutFor(sdl.SDLK_L, mods).?);
         try testing.expectEqual(Action.new_tab, shortcutFor(sdl.SDLK_T, mods).?);
-        try testing.expectEqual(Action.close_tab, shortcutFor(sdl.SDLK_W, mods).?);
+        try testing.expectEqual(Action.close_pane, shortcutFor(sdl.SDLK_W, mods).?);
     }
 }
 
@@ -1096,6 +1221,7 @@ test "no binding depends on Shift" {
         sdl.SDLK_V, sdl.SDLK_C, sdl.SDLK_D,           sdl.SDLK_L,
         sdl.SDLK_0, sdl.SDLK_1, sdl.SDLK_EQUALS,      sdl.SDLK_MINUS,
         sdl.SDLK_9, sdl.SDLK_A, sdl.SDLK_LEFTBRACKET, sdl.SDLK_RIGHTBRACKET,
+        sdl.SDLK_E, sdl.SDLK_Y, sdl.SDLK_LEFT,        sdl.SDLK_UP,
     };
     for (keys) |k| {
         const plain = shortcutFor(k, sdl.KMOD_LGUI);

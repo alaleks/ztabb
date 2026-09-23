@@ -12,6 +12,7 @@ const theme = @import("theme");
 const highlight = @import("highlight");
 const icons = @import("icons");
 const tabs_mod = @import("tabs");
+const panes = @import("panes");
 
 pub const TAB_BAR_CELLS: u32 = 2;
 /// Breathing room around the terminal grid, in cells. Text hard against the
@@ -484,10 +485,23 @@ pub const Renderer = struct {
         hl: ?HighlightOverlay,
         sel: ?term.Selection,
     ) void {
+        self.drawPane(t, th, .{ .x = 0, .y = 0, .w = t.cols, .h = t.rows }, top, hl, sel);
+    }
+
+    /// Draws one pane's grid at its place in the tab.
+    pub fn drawPane(
+        self: *Renderer,
+        t: *const term.Terminal,
+        th: *const theme.Theme,
+        rect: panes.Rect,
+        top: f32,
+        hl: ?HighlightOverlay,
+        sel: ?term.Selection,
+    ) void {
         const cw: f32 = @floatFromInt(self.cellW());
         const ch: f32 = @floatFromInt(self.cellH());
-        const left = self.padX();
-        const origin = top + self.padY();
+        const left = self.padX() + @as(f32, @floatFromInt(rect.x)) * cw;
+        const origin = top + self.padY() + @as(f32, @floatFromInt(rect.y)) * ch;
 
         for (0..t.rows) |ri| {
             const row: u32 = @intCast(ri);
@@ -563,17 +577,30 @@ pub const Renderer = struct {
             }
         }
 
-        self.drawCursor(t, th, origin);
-        self.drawScrollIndicator(t, th, origin);
+        self.drawCursor(t, th, origin, left);
+        self.drawScrollIndicator(t, th, origin, left);
     }
 
-    fn drawCursor(self: *Renderer, t: *const term.Terminal, th: *const theme.Theme, top: f32) void {
+    /// The rule between two panes.
+    pub fn drawDivider(self: *Renderer, th: *const theme.Theme, rect: panes.Rect, top: f32, vertical: bool) void {
+        const cw: f32 = @floatFromInt(self.cellW());
+        const ch: f32 = @floatFromInt(self.cellH());
+        const x = self.padX() + @as(f32, @floatFromInt(rect.x)) * cw;
+        const y = top + self.padY() + @as(f32, @floatFromInt(rect.y)) * ch;
+        if (vertical) {
+            self.fill(x + cw / 2 - self.hairline() / 2, y, self.hairline(), @as(f32, @floatFromInt(rect.h)) * ch, th.tab_border);
+        } else {
+            self.fill(x, y + ch / 2 - self.hairline() / 2, @as(f32, @floatFromInt(rect.w)) * cw, self.hairline(), th.tab_border);
+        }
+    }
+
+    fn drawCursor(self: *Renderer, t: *const term.Terminal, th: *const theme.Theme, top: f32, left: f32) void {
         // While scrolled back, the cursor belongs to a screen the user is not
         // looking at, so hide it rather than drawing it at the wrong row.
         if (!t.cursor_visible or t.view_offset != 0) return;
         const cw: f32 = @floatFromInt(self.cellW());
         const ch: f32 = @floatFromInt(self.cellH());
-        const x = self.padX() + @as(f32, @floatFromInt(t.cursor_col)) * cw;
+        const x = left + @as(f32, @floatFromInt(t.cursor_col)) * cw;
         const y = top + @as(f32, @floatFromInt(t.cursor_row)) * ch;
         self.fill(x, y, cw, ch, th.cursor);
 
@@ -582,13 +609,13 @@ pub const Renderer = struct {
     }
 
     /// A slim bar on the right edge showing the scrollback position.
-    fn drawScrollIndicator(self: *Renderer, t: *const term.Terminal, th: *const theme.Theme, top: f32) void {
+    fn drawScrollIndicator(self: *Renderer, t: *const term.Terminal, th: *const theme.Theme, top: f32, left: f32) void {
         if (t.view_offset == 0 or t.sb_len == 0) return;
         const cw: f32 = @floatFromInt(self.cellW());
         const ch: f32 = @floatFromInt(self.cellH());
         const height = @as(f32, @floatFromInt(t.rows)) * ch;
         const width = @max(2.0, cw / 4.0);
-        const x = self.padX() + @as(f32, @floatFromInt(t.cols)) * cw - width;
+        const x = left + @as(f32, @floatFromInt(t.cols)) * cw - width;
 
         const total: f32 = @floatFromInt(t.sb_len + t.rows);
         const thumb = @max(ch, height * @as(f32, @floatFromInt(t.rows)) / total);
@@ -715,6 +742,17 @@ pub const Renderer = struct {
     }
 
     // -- overlays ----------------------------------------------------------
+
+    /// The cell under a point in the tab's own coordinates, before any pane
+    /// is taken into account. Not clamped: a point on a divider has no cell.
+    pub fn cellAtTab(self: *const Renderer, top: f32, x: f32, y: f32) struct { row: u32, col: u32 } {
+        const col_f = (x - self.padX()) / @as(f32, @floatFromInt(self.cellW()));
+        const row_f = (y - top - self.padY()) / @as(f32, @floatFromInt(self.cellH()));
+        return .{
+            .row = if (row_f <= 0) 0 else @intFromFloat(row_f),
+            .col = if (col_f <= 0) 0 else @intFromFloat(col_f),
+        };
+    }
 
     /// The grid cell under a point, clamped to the grid. `top` is where the
     /// terminal area begins.

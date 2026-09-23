@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
     const icons_mod = mod(b, "src/icons.zig", target, optimize);
     const appicon_mod = mod(b, "src/appicon.zig", target, optimize);
     const png_mod = mod(b, "src/png.zig", target, optimize);
+    const panes_mod = mod(b, "src/panes.zig", target, optimize);
     const macos_mod = mod(b, "src/macos.zig", target, optimize);
     // The Objective-C runtime, for the handful of window calls SDL does not
     // wrap. Nothing else in the project touches it.
@@ -43,6 +44,7 @@ pub fn build(b: *std.Build) void {
     tabs_mod.addImport("pty", pty_mod);
     tabs_mod.addImport("term", term_mod);
     tabs_mod.addImport("ssh", ssh_mod);
+    tabs_mod.addImport("panes", panes_mod);
 
     const render_mod = mod(b, "src/render.zig", target, optimize);
     render_mod.addImport("sdl", sdl_mod);
@@ -52,6 +54,7 @@ pub fn build(b: *std.Build) void {
     render_mod.addImport("theme", theme_mod);
     render_mod.addImport("highlight", highlight_mod);
     render_mod.addImport("tabs", tabs_mod);
+    render_mod.addImport("panes", panes_mod);
 
     const app_mod = mod(b, "src/app.zig", target, optimize);
     app_mod.addImport("sdl", sdl_mod);
@@ -60,6 +63,7 @@ pub fn build(b: *std.Build) void {
     app_mod.addImport("theme", theme_mod);
     app_mod.addImport("ssh", ssh_mod);
     app_mod.addImport("render", render_mod);
+    app_mod.addImport("panes", panes_mod);
     app_mod.addImport("appicon", appicon_mod);
     app_mod.addImport("macos", macos_mod);
     app_mod.addImport("font", font_mod);
@@ -132,6 +136,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "icons", .module = icons_mod },
         .{ .name = "appicon", .module = appicon_mod },
         .{ .name = "png", .module = png_mod },
+        .{ .name = "panes", .module = panes_mod },
         .{ .name = "macos", .module = macos_mod },
         .{ .name = "terminal", .module = term_mod },
         .{ .name = "highlight", .module = highlight_mod },
