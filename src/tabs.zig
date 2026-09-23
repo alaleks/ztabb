@@ -458,12 +458,19 @@ fn sleepMs(ms: u32) void {
     _ = usleep(ms * 1000);
 }
 
-/// Tabs that run `cat` rather than a login shell, so the tests do not depend on
-/// the developer's shell configuration or startup time.
+/// A command that echoes its input, spelled for the platform. Tests use this
+/// rather than a login shell so they do not depend on the developer's shell
+/// configuration or its startup time.
+fn echoCommand() []const [*:0]const u8 {
+    return if (@import("builtin").os.tag == .windows)
+        &[_][*:0]const u8{"cmd.exe /c more"}
+    else
+        &[_][*:0]const u8{ "/bin/cat", "-u" };
+}
+
 fn addTestTab(tabs: *Tabs, name: []const u8, cols: u32, rows: u32) !usize {
     if (tabs.count >= MAX_TABS) return error.TooManyTabs;
-    const argv = [_][*:0]const u8{ "/bin/cat", "-u" };
-    var p = try pty.Pty.spawn(&argv, &.{}, @intCast(cols), @intCast(rows));
+    var p = try pty.Pty.spawn(echoCommand(), &.{}, @intCast(cols), @intCast(rows));
     errdefer p.close();
     const t = try term.Terminal.init(tabs.gpa, cols, rows, 32);
     tabs.items[tabs.count] = .{
@@ -745,8 +752,11 @@ test "reapExited closes tabs whose child is gone" {
     defer tabs.deinit();
     _ = try addTestTab(&tabs, "stays", 40, 8);
 
-    const argv = [_][*:0]const u8{"/usr/bin/true"};
-    const p = try pty.Pty.spawn(&argv, &.{}, 40, 8);
+    const argv: []const [*:0]const u8 = if (@import("builtin").os.tag == .windows)
+        &.{"cmd.exe /c exit"}
+    else
+        &.{"/usr/bin/true"};
+    const p = try pty.Pty.spawn(argv, &.{}, 40, 8);
     const t = try term.Terminal.init(tabs.gpa, 40, 8, 32);
     tabs.items[1] = .{
         .slots = @splat(null),

@@ -32,6 +32,16 @@ pub fn build(b: *std.Build) void {
     const ssh_mod = mod(b, "src/ssh.zig", target, optimize);
 
     const sdl_mod = mod(b, "src/sdl.zig", target, optimize);
+    // Windows has no standard place for libraries, so point the search at
+    // whatever installed SDL3 -- vcpkg by default.
+    if (target.result.os.tag == .windows) {
+        const sdl_root = b.option([]const u8, "sdl3", "Path to an SDL3 install (Windows)") orelse
+            b.graph.environ_map.get("SDL3_ROOT");
+        if (sdl_root) |root| {
+            sdl_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ root, "include" }) });
+            sdl_mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
+        }
+    }
     sdl_mod.linkSystemLibrary("SDL3", .{});
 
     const term_mod = mod(b, "src/terminal.zig", target, optimize);
@@ -142,6 +152,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "highlight", .module = highlight_mod },
         .{ .name = "ssh", .module = ssh_mod },
         .{ .name = "pty", .module = pty_mod },
+        .{ .name = "pty-posix", .module = mod(b, "src/pty_posix.zig", target, optimize) },
         .{ .name = "tabs", .module = tabs_mod },
         .{ .name = "sdl", .module = sdl_mod },
         .{ .name = "render", .module = render_mod },

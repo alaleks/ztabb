@@ -1,5 +1,6 @@
-# Fires on a v* tag. ztabb links SDL3 and ships as a macOS .app, so a release
-# is a pair of signed bundles rather than bare cross-compiled binaries.
+# Fires on a v* tag. ztabb links SDL3, so every artifact is built on the
+# platform it runs on: macOS ships signed .app bundles, Linux a binary that
+# links the system SDL3.
 name: Release
 
 on:
@@ -25,6 +26,8 @@ jobs:
             os: macos-14
           - arch: x86_64-macos
             os: macos-13
+          - arch: x86_64-linux
+            os: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -33,23 +36,41 @@ jobs:
         with:
           version: "0.16.0"
 
-      - name: Install SDL3
+      - name: Install SDL3 (macOS)
+        if: runner.os == 'macOS'
         run: brew install sdl3
+
+      - name: Install SDL3 (Linux)
+        if: runner.os == 'Linux'
+        run: ./tools/install-sdl3-linux.sh
 
       - name: Test
         run: zig build test -Doptimize=ReleaseFast
 
       - name: Build app bundle
+        if: runner.os == 'macOS'
         run: zig build bundle -Doptimize=ReleaseFast
+
+      - name: Build binary
+        if: runner.os == 'Linux'
+        run: zig build -Doptimize=ReleaseFast
 
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
-          # Keep the bundle structure and its permissions; a zip of a .app is
-          # what macOS expects to receive.
-          (cd zig-out && ditto -c -k --keepParent ztabb.app \
-            "../dist/ztabb-${{ matrix.arch }}.zip")
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # Keep the bundle structure and its permissions; a zip of a .app is
+            # what macOS expects to receive.
+            (cd zig-out && ditto -c -k --keepParent ztabb.app \
+              "../dist/ztabb-${{ matrix.arch }}.zip")
+          else
+            install -D zig-out/bin/ztabb "pack/ztabb"
+            install -D LICENSE "pack/LICENSE"
+            install -D NOTICE "pack/NOTICE"
+            install -D licenses/JetBrainsMono-OFL.txt "pack/licenses/JetBrainsMono-OFL.txt"
+            tar czf "dist/ztabb-${{ matrix.arch }}.tar.gz" -C pack .
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -70,7 +91,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum *.zip > checksums.txt
+        run: sha256sum * > checksums.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -78,7 +99,10 @@ jobs:
           generate_release_notes: true
           files: dist/*
           body: |
-            The bundles are ad-hoc signed, not signed with a Developer ID.
+            Linux needs SDL3 installed (`libsdl3-0` or equivalent); the
+            tarball carries the binary and the licences.
+
+            The macOS bundles are ad-hoc signed, not signed with a Developer ID.
             macOS will quarantine a downloaded copy, so on first launch either
             right-click the app and choose Open, or clear the flag:
 

@@ -164,11 +164,19 @@ fn followIncludes(
     }
 }
 
-/// `$HOME`, or null when the process has none.
+/// The user's home directory: `$HOME`, or `%USERPROFILE%` on Windows, which
+/// is where OpenSSH for Windows looks for `.ssh` too.
 fn homeDir() ?[]const u8 {
-    const raw = std.c.getenv("HOME") orelse return null;
-    const s = std.mem.span(raw);
-    return if (s.len == 0) null else s;
+    const names: []const [*:0]const u8 = if (@import("builtin").os.tag == .windows)
+        &.{ "USERPROFILE", "HOME" }
+    else
+        &.{"HOME"};
+    for (names) |name| {
+        const raw = std.c.getenv(name) orelse continue;
+        const s = std.mem.span(raw);
+        if (s.len > 0) return s;
+    }
+    return null;
 }
 
 const Directive = struct { key: []const u8, value: []const u8 };

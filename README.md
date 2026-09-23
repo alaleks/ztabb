@@ -2,15 +2,15 @@
 
 # ztabb
 
-A terminal that stays out of the way: one small native process, a bundled
-typeface, and no runtime you have to feed.
+A fast, lightweight terminal: one native process, a bundled typeface, and no
+runtime to feed. macOS, Linux and Windows.
 
 Tabs, a VT/xterm emulator, hosts read from `~/.ssh/config`, light and dark
 themes, and syntax colouring on the line you are typing.
 
 ## What it costs
 
-Measured on this machine, an Apple Silicon Mac, against Tabby running beside it:
+Measured on an Apple Silicon Mac, against Tabby running beside it:
 
 |                    | ztabb          | Tabby               |
 | ------------------ | -------------- | ------------------- |
@@ -58,15 +58,19 @@ inside `ztabb.app`. `NOTICE` spells out how each clause is met.
 ```sh
 zig build                       # build
 zig build run                   # build and run
-zig build test                  # 347 unit tests
+zig build test                  # 349 unit tests
 zig build -Doptimize=ReleaseFast
 
 zig build bundle                # zig-out/ztabb.app, with its icon (macOS)
 ```
 
-`zig build bundle` is what puts the icon in the Dock, Finder and Launchpad:
-macOS shows an application icon for a bundle, and a bare executable borrows the
-terminal's.
+`zig build bundle` is macOS-only: it is what puts the icon in the Dock, Finder
+and Launchpad, since macOS shows an application icon for a bundle and a bare
+executable borrows the terminal's.
+
+On Linux, install SDL3 (`tools/install-sdl3-linux.sh` does it from the package
+manager or from source) and `zig build`. On Windows, `vcpkg install
+sdl3:x64-windows` and `zig build -Dsdl3=<vcpkg>/installed/x64-windows`.
 
 ## Install (macOS)
 
@@ -255,7 +259,9 @@ src/
 ├── app.zig         window, event loop, key bindings
 ├── render.zig      grid, tab bar, overlays
 ├── terminal.zig    screen model and escape parser
-├── pty.zig         pty and child process
+├── pty.zig         picks the platform's pty
+├── pty_posix.zig   openpty and a forked child
+├── pty_windows.zig ConPTY
 ├── tabs.zig        tab list
 ├── theme.zig       light and dark palettes
 ├── highlight.zig   command-line lexer
@@ -272,10 +278,11 @@ tools/
 ├── genfont.c       typeface generator (only to re-bake it)
 ├── mkiconset.zig   renders the .iconset for iconutil
 ├── mklogo.zig      renders the README logo frames
+├── install-sdl3-linux.sh  SDL3 from the package manager or source
 └── bundle.sh       assembles ztabb.app
 ```
 
-Every module builds and tests on its own: `zig build test` runs twelve
+Every module builds and tests on its own: `zig build test` runs thirteen
 independent suites.
 
 ### Regenerating the artwork
@@ -301,13 +308,29 @@ cc -O2 -o /tmp/genfont tools/genfont.c -lm \
 /tmp/genfont 0x41 0x2500        # dump glyphs as ASCII art
 ```
 
-## Platform
+## Platforms
 
-Built and measured on macOS. The core — pty, terminal, tabs, fonts, themes —
-takes its constants from the platform rather than hardcoding BSD values, and
-cross-compiles to Linux; the build links `libutil` there, where `openpty` lives.
-The transparent title bar is macOS-only, and elsewhere the window keeps an
-ordinary system title.
+| | State |
+| --- | --- |
+| **macOS** | Built, run and measured here. Ships as a signed `.app`. |
+| **Linux** | Builds and tests in CI. Needs SDL3 installed. |
+| **Windows** | Builds and tests in CI. Needs SDL3 (`vcpkg install sdl3`). |
+
+Nothing is written twice that does not have to be. The pty is the one place the
+platforms genuinely differ: POSIX gets `openpty` and a forked child, while
+Windows has neither and uses **ConPTY**, a pseudo-console driven through a pair
+of pipes. Both present the same API, so the terminal, the tabs, the panes and
+the renderer above them are one implementation.
+
+Everything else takes its constants from the platform rather than assuming one:
+`errno`, `O_NONBLOCK` and signal numbers differ between the BSDs and Linux, and
+`~/.ssh/config` is found through `%USERPROFILE%` on Windows the way OpenSSH
+finds it there. The transparent title bar is the only deliberately macOS-only
+piece; elsewhere the window keeps an ordinary system title.
+
+The `.app` bundle, its icon and the `.icns` are macOS packaging and are built
+only by `zig build bundle`. On Linux and Windows `zig build` produces the
+binary, and the window icon is set at runtime on every platform.
 
 ## Roadmap
 
@@ -322,5 +345,4 @@ ordinary system title.
 - [x] Memory ceiling on a tab's history
 - [x] Mouse selection and copying a range
 - [x] Bracketed paste
-- [ ] хорош
 - [ ] Custom themes and key bindings from a config file

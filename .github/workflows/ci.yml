@@ -1,8 +1,7 @@
-# ztabb links SDL3, so a full build needs it present. macOS gets it from
-# Homebrew and runs everything; on Linux the runner images do not carry SDL3
-# yet, so that job checks the part of the tree that does not need it -- the
-# terminal, the pty, the typeface and the parsers -- which is most of the code
-# and all of the platform-sensitive code.
+# ztabb links SDL3, so a full build needs it present. Both platforms get it and
+# run the whole suite; the cross job then compiles every module for targets
+# there is no SDL3 to link against here, which is what catches platform-gated
+# code that a host build never analyses.
 name: CI
 
 on:
@@ -66,7 +65,7 @@ jobs:
           codesign -v zig-out/ztabb.app
 
   linux:
-    name: Linux (core)
+    name: Linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,14 +73,43 @@ jobs:
         with:
           version: "0.16.0"
 
-      # The pty layer reads errno, O_NONBLOCK and signal numbers from the
+      # From the package manager where it exists, from source where it does
+      # not: SDL3 is recent enough that older images carry no package.
+      - name: Install SDL3
+        run: ./tools/install-sdl3-linux.sh
+
+      # The pty layer takes errno, O_NONBLOCK and signal numbers from the
       # platform because the BSD and Linux values differ. Only a Linux build
       # proves that.
-      - name: Core unit tests
-        run: zig build test-core
+      - name: Unit tests
+        run: zig build test
 
-      - name: Core unit tests (ReleaseFast)
-        run: zig build test-core -Doptimize=ReleaseFast
+      - name: Unit tests (ReleaseFast)
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: "0.16.0"
+
+      # SDL3 from vcpkg, which is already on the runner image.
+      - name: Install SDL3
+        shell: bash
+        run: |
+          vcpkg install sdl3:x64-windows
+          echo "SDL3_ROOT=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+
+      # The pty here is ConPTY, a different implementation behind the same
+      # API, so only a Windows run exercises it.
+      - name: Unit tests
+        run: zig build test
 
   cross:
     name: Cross-compile ${{ matrix.target }}
@@ -89,7 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [aarch64-linux-gnu, x86_64-macos, aarch64-macos]
+        target: [aarch64-linux-gnu, x86_64-macos, aarch64-macos, x86_64-windows-gnu]
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v1
@@ -104,7 +132,7 @@ jobs:
         run: |
           set -eu
           t=${{ matrix.target }}
-          for m in font theme ssh icons appicon png pty macos; do
+          for m in font theme ssh icons appicon png pty macos panes; do
             zig build-obj -target "$t" -lc -Mroot="src/$m.zig" -femit-bin=/dev/null
           done
           zig build-obj -target "$t" -lc \
