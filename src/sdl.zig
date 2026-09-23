@@ -255,6 +255,7 @@ extern "c" fn SDL_DestroySurface(surface: ?*Surface) void;
 extern "c" fn SDL_SetWindowIcon(window: ?*Window, icon: ?*Surface) bool;
 extern "c" fn SDL_GetWindowProperties(window: ?*Window) u32;
 extern "c" fn SDL_GetPointerProperty(props: u32, name: [*:0]const u8, default_value: ?*anyopaque) ?*anyopaque;
+extern "c" fn SDL_GetModState() u16;
 extern "c" fn SDL_GetClipboardText() [*:0]u8;
 extern "c" fn SDL_SetClipboardText(text: [*:0]const u8) bool;
 extern "c" fn SDL_free(mem: ?*anyopaque) void;
@@ -438,6 +439,12 @@ pub fn freeClipboardText(text: [:0]u8) void {
 
 pub fn setClipboardText(text: [*:0]const u8) void {
     _ = SDL_SetClipboardText(text);
+}
+
+/// The modifier keys held right now. Mouse events do not carry them, and
+/// Shift is what overrides a program's grab of the mouse.
+pub fn modState() u16 {
+    return SDL_GetModState();
 }
 
 pub fn ticks() u64 {

@@ -291,7 +291,7 @@ pub const App = struct {
             sdl.EVENT_KEY_DOWN => self.onKeyDown(event.key),
             sdl.EVENT_TEXT_INPUT => self.onTextInput(event.text),
             sdl.EVENT_MOUSE_BUTTON_DOWN => self.onMouseDown(event.button),
-            sdl.EVENT_MOUSE_BUTTON_UP => self.dragging = false,
+            sdl.EVENT_MOUSE_BUTTON_UP => self.onMouseUp(event.button),
             sdl.EVENT_MOUSE_MOTION => self.onMouseMotion(event.motion),
             sdl.EVENT_MOUSE_WHEEL => self.onWheel(event.wheel),
             else => {},
@@ -438,6 +438,12 @@ pub const App = struct {
             self.ui_dirty = true;
             return;
         }
+        // A program that asked for the mouse gets the click, unless Shift is
+        // held -- the long-standing way to reach the terminal's own selection
+        // while something like vim has the mouse.
+        if (y >= self.chromeH() and !shiftHeld()) {
+            if (self.reportMouse(ev.button - 1, x, y, true)) return;
+        }
         if (ev.button != sdl.BUTTON_LEFT) return;
 
         if (self.picker) |p| {
@@ -488,6 +494,33 @@ pub const App = struct {
                 if (self.tabs.count == 0) self.running = false;
             },
             .none => {},
+        }
+    }
+
+    fn shiftHeld() bool {
+        return sdl.modState() & sdl.KMOD_SHIFT != 0;
+    }
+
+    /// Sends a mouse event to the program, if it asked for them.
+    /// Returns true when the event was its business rather than ours.
+    fn reportMouse(self: *App, button: u8, x: f32, y: f32, pressed: bool) bool {
+        const tab = self.tabs.active() orelse return false;
+        const p = tab.active();
+        if (!p.terminal.mouse.wants()) return false;
+
+        const at = self.renderer.cellAt(&p.terminal, self.chromeH(), x, y);
+        var buf: [32]u8 = undefined;
+        const report = p.terminal.mouse.encode(&buf, button, at.col, at.row, pressed);
+        if (report.len > 0) p.pty.write(report) catch {};
+        return true;
+    }
+
+    fn onMouseUp(self: *App, ev: sdl.MouseButtonEvent) void {
+        self.dragging = false;
+        const scale: f32 = @floatFromInt(self.dpi_scale);
+        const y = ev.y * scale;
+        if (y >= self.chromeH() and !shiftHeld()) {
+            _ = self.reportMouse(ev.button - 1, ev.x * scale, y, false);
         }
     }
 
@@ -559,11 +592,52 @@ pub const App = struct {
         return self.title_h + @as(f32, @floatFromInt(self.renderer.cellH() * rnd.TAB_BAR_CELLS));
     }
 
+    /// Lines a wheel notch moves, the usual convention.
+    const WHEEL_LINES: i32 = 3;
+
     fn onWheel(self: *App, ev: sdl.MouseWheelEvent) void {
         const tab = self.tabs.active() orelse return;
-        // Three lines per notch, the usual convention.
-        const lines: i32 = @intFromFloat(@round(ev.y * 3));
-        if (lines != 0) tab.active().terminal.scrollView(lines);
+        const lines: i32 = @intFromFloat(@round(ev.y * @as(f32, WHEEL_LINES)));
+        if (lines == 0) return;
+
+        const p = tab.active();
+        const up = lines > 0;
+        const count: usize = @intCast(@abs(lines));
+
+        // A program that asked for the mouse handles the wheel itself.
+        if (p.terminal.mouse.wants()) {
+            const scale: f32 = @floatFromInt(self.dpi_scale);
+            const at = self.renderer.cellAt(
+                &p.terminal,
+                self.chromeH(),
+                ev.mouse_x * scale,
+                ev.mouse_y * scale,
+            );
+            var buf: [32]u8 = undefined;
+            for (0..count) |_| {
+                const report = p.terminal.mouse.encode(
+                    &buf,
+                    if (up) 64 else 65,
+                    at.col,
+                    at.row,
+                    true,
+                );
+                if (report.len > 0) p.pty.write(report) catch {};
+            }
+            return;
+        }
+
+        // On the alternate screen there is no history to move through: the
+        // program is drawing the whole window. Send it the arrows it would
+        // have got from the keyboard, which is how a pager or an editor gets
+        // scrolled by a wheel.
+        if (p.terminal.onAltScreen()) {
+            const arrow = if (up) "\x1b[A" else "\x1b[B";
+            for (0..count) |_| p.pty.write(arrow) catch {};
+            return;
+        }
+
+        p.terminal.scrollView(lines);
     }
 
     // -- commands ----------------------------------------------------------

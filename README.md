@@ -105,10 +105,18 @@ they always do.
 | `Cmd+=` / `Cmd+-` / `Cmd+0`       | Font size: up / down / back to 13 pt |
 | `Cmd+C` / `Cmd+V`                 | Copy selection or line / paste       |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll history                       |
-| Mouse wheel                       | Scroll history                       |
+| Mouse wheel                       | Scroll (see below)                   |
 
 No binding uses Shift as an extra modifier: under the Ctrl+Shift form it is
 already spoken for, and such a combination would be unreachable there.
+
+The wheel does whatever suits what is running. With a shell at a prompt it
+moves through the history. On the alternate screen — `nano`, `vim`, `less` —
+there is no history to move through, because the program is drawing the whole
+window, so the wheel is sent as the arrow keys it would otherwise have got. And
+a program that has asked for the mouse itself receives the wheel and the clicks
+as events, in whichever encoding it negotiated. Holding **Shift** takes the
+mouse back for selection while such a program has it.
 
 **Right-click** over the terminal opens a menu: copy, paste, split the pane
 right or down, close it. Items that would do nothing — copy with no selection —

@@ -138,6 +138,8 @@ pub const Terminal = struct {
     /// DECSET 2004. When on, pasted text is wrapped in markers so the program
     /// can tell it from typing and refuse to run it.
     bracketed_paste: bool = false,
+    /// What the program wants to hear about the mouse, and how.
+    mouse: MouseMode = .{},
 
     state: ParseState = .ground,
     params: [MAX_PARAMS]u32 = [_]u32{0} ** MAX_PARAMS,
@@ -568,6 +570,7 @@ pub const Terminal = struct {
         self.cursor_col = 0;
         self.cursor_visible = true;
         self.bracketed_paste = false;
+        self.mouse = .{};
         self.wrap_pending = false;
         self.scroll_top = 0;
         self.scroll_bot = self.rows - 1;
@@ -895,6 +898,10 @@ pub const Terminal = struct {
         for (self.params[0..self.param_count]) |mode| {
             switch (mode) {
                 25 => self.cursor_visible = on, // DECTCEM
+                1000 => self.mouse.buttons = on,
+                1002 => self.mouse.drag = on,
+                1003 => self.mouse.any_motion = on,
+                1006 => self.mouse.sgr = on,
                 2004 => self.bracketed_paste = on,
                 1049, 1047, 47 => if (on) self.enterAltScreen() else self.leaveAltScreen(),
                 else => {},
@@ -1038,6 +1045,62 @@ pub const Terminal = struct {
         } else if (byte == 0x1B) {
             self.state = .esc;
         }
+    }
+};
+
+/// Which mouse events a program asked for, and in which encoding.
+///
+/// A program that has asked wants to handle the mouse itself -- `less` scrolls
+/// with the wheel, `vim` moves the cursor on a click -- so the terminal must
+/// forward events rather than act on them.
+pub const MouseMode = struct {
+    /// DECSET 1000: button presses and releases.
+    buttons: bool = false,
+    /// DECSET 1002: also movement while a button is held.
+    drag: bool = false,
+    /// DECSET 1003: also movement with no button held.
+    any_motion: bool = false,
+    /// DECSET 1006: the SGR encoding, which has no 223-column limit.
+    sgr: bool = false,
+
+    pub fn wants(self: MouseMode) bool {
+        return self.buttons or self.drag or self.any_motion;
+    }
+
+    /// Encodes one event for the program.
+    ///
+    /// `button` is the code the protocol uses: 0-2 for the buttons, 64 and 65
+    /// for the wheel; `row` and `col` are zero-based here and one-based on the
+    /// wire. Returns the bytes written into `buf`.
+    pub fn encode(
+        self: MouseMode,
+        buf: []u8,
+        button: u8,
+        col: u32,
+        row: u32,
+        pressed: bool,
+    ) []const u8 {
+        if (self.sgr) {
+            return std.fmt.bufPrint(buf, "\x1b[<{d};{d};{d}{c}", .{
+                button,
+                col + 1,
+                row + 1,
+                @as(u8, if (pressed) 'M' else 'm'),
+            }) catch buf[0..0];
+        }
+
+        // The original encoding adds 32 to every field so each lands in a
+        // printable byte, which also caps it at column 223.
+        if (col > 222 or row > 222) return buf[0..0];
+        if (buf.len < 6) return buf[0..0];
+        const code: u8 = if (pressed) button else 3;
+        buf[0] = 0x1b;
+        buf[1] = '[';
+        buf[2] = 'M';
+        buf[3] = 32 + code;
+        buf[4] = @intCast(32 + col + 1);
+        buf[5] = @intCast(32 + row + 1);
+        return buf[0..6];
     }
 };
 
@@ -1785,6 +1848,57 @@ test "xterm256 covers the cube and the grey ramp" {
     try testing.expectEqual(@as(u32, 0xFFFFFF), Terminal.xterm256(231, &theme.dark));
     try testing.expectEqual(@as(u32, 0x080808), Terminal.xterm256(232, &theme.dark));
     try testing.expectEqual(@as(u32, 0xEEEEEE), Terminal.xterm256(255, &theme.dark));
+}
+
+test "mouse reporting modes are tracked" {
+    var t = try testTerm(10, 2);
+    defer t.deinit();
+    try testing.expect(!t.mouse.wants());
+
+    t.write("\x1b[?1000h");
+    try testing.expect(t.mouse.buttons);
+    try testing.expect(t.mouse.wants());
+
+    t.write("\x1b[?1002h\x1b[?1006h");
+    try testing.expect(t.mouse.drag);
+    try testing.expect(t.mouse.sgr);
+
+    t.write("\x1b[?1000l\x1b[?1002l");
+    try testing.expect(!t.mouse.wants());
+    try testing.expect(t.mouse.sgr); // the encoding is not a request
+}
+
+test "a reset stops mouse reporting" {
+    var t = try testTerm(10, 2);
+    defer t.deinit();
+    t.write("\x1b[?1003h\x1b[?1006h\x1bc");
+    try testing.expect(!t.mouse.wants());
+    try testing.expect(!t.mouse.sgr);
+}
+
+test "the SGR encoding writes a readable, unbounded report" {
+    const mode = MouseMode{ .buttons = true, .sgr = true };
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("\x1b[<0;1;1M", mode.encode(&buf, 0, 0, 0, true));
+    try testing.expectEqualStrings("\x1b[<0;1;1m", mode.encode(&buf, 0, 0, 0, false));
+    // Wheel up, well past the column the old encoding could reach.
+    try testing.expectEqualStrings("\x1b[<64;301;51M", mode.encode(&buf, 64, 300, 50, true));
+}
+
+test "the original encoding offsets its fields and gives up past its limit" {
+    const mode = MouseMode{ .buttons = true };
+    var buf: [32]u8 = undefined;
+
+    const press = mode.encode(&buf, 0, 0, 0, true);
+    try testing.expectEqualSlices(u8, &.{ 0x1b, '[', 'M', 32, 33, 33 }, press);
+
+    // Release is button 3 whichever was let go.
+    const release = mode.encode(&buf, 2, 4, 9, false);
+    try testing.expectEqualSlices(u8, &.{ 0x1b, '[', 'M', 35, 37, 42 }, release);
+
+    // Beyond 223 columns it cannot say where the pointer is, so it says
+    // nothing rather than something wrong.
+    try testing.expectEqual(@as(usize, 0), mode.encode(&buf, 0, 300, 5, true).len);
 }
 
 test "bracketed paste mode is tracked" {
