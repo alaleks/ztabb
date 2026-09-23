@@ -17,6 +17,7 @@ pub const WINDOW_RESIZABLE: u64 = 0x20;
 pub const WINDOW_HIGH_PIXEL_DENSITY: u64 = 0x2000;
 
 pub const EVENT_QUIT: u32 = 0x100;
+pub const EVENT_WINDOW_EXPOSED: u32 = 0x204;
 pub const EVENT_WINDOW_RESIZED: u32 = 0x206;
 pub const EVENT_WINDOW_PIXEL_SIZE_CHANGED: u32 = 0x207;
 pub const EVENT_KEY_DOWN: u32 = 0x300;
@@ -245,6 +246,8 @@ extern "c" fn SDL_SetTextureBlendMode(tex: ?*Texture, mode: u32) bool;
 extern "c" fn SDL_SetTextureColorMod(tex: ?*Texture, r: u8, g: u8, b: u8) bool;
 extern "c" fn SDL_SetTextureScaleMode(tex: ?*Texture, mode: u32) bool;
 extern "c" fn SDL_PollEvent(event: *Event) bool;
+extern "c" fn SDL_AddEventWatch(filter: EventFilter, userdata: ?*anyopaque) bool;
+extern "c" fn SDL_RemoveEventWatch(filter: EventFilter, userdata: ?*anyopaque) void;
 extern "c" fn SDL_WaitEventTimeout(event: *Event, timeout_ms: c_int) bool;
 extern "c" fn SDL_StartTextInput(window: ?*Window) bool;
 extern "c" fn SDL_StopTextInput(window: ?*Window) bool;
@@ -400,6 +403,26 @@ pub fn setTextureColorMod(tex: ?*Texture, rgb: u32) void {
 
 pub fn pollEvent(event: *Event) bool {
     return SDL_PollEvent(event);
+}
+
+/// Called as an event is posted, before it reaches the queue.
+///
+/// Returning true leaves the event in the queue for the normal loop to see.
+pub const EventFilter = *const fn (userdata: ?*anyopaque, event: *Event) callconv(.c) bool;
+
+/// Installs a watch that sees events as they are posted.
+///
+/// The reason to want one: a desktop that runs its own modal loop while a
+/// window is being dragged by its edge -- macOS does -- does not let
+/// `pollEvent` or `waitEventTimeout` return until the drag ends, so a plain
+/// event loop is frozen for the whole drag. A watch is called from inside
+/// that loop and can redraw there.
+pub fn addEventWatch(filter: EventFilter, userdata: ?*anyopaque) void {
+    _ = SDL_AddEventWatch(filter, userdata);
+}
+
+pub fn removeEventWatch(filter: EventFilter, userdata: ?*anyopaque) void {
+    SDL_RemoveEventWatch(filter, userdata);
 }
 
 /// Blocks for at most `timeout_ms`. Used to idle cheaply when no pty has data.

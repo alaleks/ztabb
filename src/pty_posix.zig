@@ -84,6 +84,9 @@ pub const Pty = struct {
     /// Set once the child has been reaped; the tab may then be closed.
     exited: bool = false,
     exit_status: u32 = 0,
+    /// The size the child was last told about.
+    cols: u16,
+    rows: u16,
 
     /// Starts `argv[0]` on the slave side of a fresh pty sized `cols` x `rows`.
     ///
@@ -132,7 +135,7 @@ pub const Pty = struct {
         const flags = libc.fcntl(master, F_GETFL, @as(c_int, 0));
         if (flags >= 0) _ = libc.fcntl(master, F_SETFL, flags | O_NONBLOCK);
 
-        return .{ .master = master, .child = pid };
+        return .{ .master = master, .child = pid, .cols = cols, .rows = rows };
     }
 
     /// Convenience wrapper: runs the user's login shell.
@@ -190,6 +193,12 @@ pub const Pty = struct {
     }
 
     pub fn resize(self: *Pty, cols: u16, rows: u16) void {
+        // A window size the child already has is not worth a SIGWINCH: the
+        // shell repaints its prompt on every one, and the geometry is
+        // recomputed on events that change nothing about it.
+        if (cols == self.cols and rows == self.rows) return;
+        self.cols = cols;
+        self.rows = rows;
         const ws = posix.winsize{
             .row = rows,
             .col = cols,

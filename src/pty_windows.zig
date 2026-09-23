@@ -165,6 +165,9 @@ pub const Pty = struct {
 
     exited: bool = false,
     exit_status: u32 = 0,
+    /// The size the child was last told about.
+    cols: u16,
+    rows: u16,
 
     /// Starts `argv[0]` under a pseudo-console sized `cols` x `rows`.
     ///
@@ -263,6 +266,8 @@ pub const Pty = struct {
             .attrs = attrs,
             .attrs_buf = attrs_buf,
             .gpa = gpa,
+            .cols = cols,
+            .rows = rows,
         };
     }
 
@@ -321,6 +326,11 @@ pub const Pty = struct {
     }
 
     pub fn resize(self: *Pty, cols: u16, rows: u16) void {
+        // Same reasoning as the POSIX side: a resize the child already knows
+        // about only makes it redraw.
+        if (cols == self.cols and rows == self.rows) return;
+        self.cols = cols;
+        self.rows = rows;
         const size = COORD{ .x = @intCast(@max(cols, 1)), .y = @intCast(@max(rows, 1)) };
         _ = ResizePseudoConsole(self.console, size);
     }

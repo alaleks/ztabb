@@ -77,6 +77,8 @@ pub const App = struct {
     /// Something outside the terminal grid changed and the window must be
     /// redrawn even though no pty produced output.
     ui_dirty: bool = true,
+    /// Guards `onWindowEvent` against drawing inside its own draw.
+    in_window_event: bool = false,
     /// The title last handed to SDL, so it is not reset every frame.
     title_buf: [tabs_mod.MAX_LABEL + 16:0]u8 = [_:0]u8{0} ** (tabs_mod.MAX_LABEL + 16),
 
@@ -210,10 +212,7 @@ pub const App = struct {
         // On a HiDPI display the backbuffer is larger than the window in
         // points; scaling the cell by that ratio keeps glyphs physically the
         // same size and pixel-aligned.
-        self.dpi_scale = if (logical_w > 0)
-            @max(1, @as(u32, @intCast(@divTrunc(px_w, logical_w))))
-        else
-            1;
+        self.dpi_scale = densityFor(px_w, logical_w);
 
         self.win_w = px_w;
         self.win_h = px_h;
@@ -232,6 +231,19 @@ pub const App = struct {
         self.rows = @intCast(@max(1, @divTrunc(px_h - chrome - pad_y, ch)));
     }
 
+    /// The backbuffer's density: how many pixels the window gets per point.
+    ///
+    /// Rounded rather than truncated. Mid-drag the two sizes are not always
+    /// exactly a factor apart -- a 2x backbuffer one pixel short of twice the
+    /// window is enough -- and truncating there reports 1x, which swaps the
+    /// whole glyph atlas for the low-density set and swaps it back on the next
+    /// event. That is what made the text flicker while a window was resized.
+    fn densityFor(pixels: i32, points: i32) u32 {
+        if (points <= 0 or pixels <= 0) return 1;
+        const rounded = @divTrunc(pixels + @divTrunc(points, 2), points);
+        return @max(1, @as(u32, @intCast(rounded)));
+    }
+
     fn applyGeometry(self: *App) void {
         self.measure();
         self.tabs.resizeAll(self.cols, self.rows);
@@ -243,7 +255,42 @@ pub const App = struct {
     /// costs a single frame.
     const ECHO_WAIT_MS: i32 = 6;
 
+    /// Redraws while the desktop holds the event loop hostage.
+    ///
+    /// macOS runs its own modal loop for the whole of a window drag, and
+    /// neither `pollEvent` nor `waitEventTimeout` returns until it ends: the
+    /// window is frozen for the drag and the compositor stretches whatever
+    /// frame it had, so the text visibly grows and snaps back. This watch is
+    /// called from inside that loop, where a frame can still be drawn.
+    ///
+    /// The event is left in the queue, so the ordinary path handles it again
+    /// once the drag finishes. Both passes are idempotent.
+    fn onWindowEvent(userdata: ?*anyopaque, event: *sdl.Event) callconv(.c) bool {
+        const self: *App = @ptrCast(@alignCast(userdata orelse return true));
+        switch (event.type_) {
+            sdl.EVENT_WINDOW_EXPOSED,
+            sdl.EVENT_WINDOW_RESIZED,
+            sdl.EVENT_WINDOW_PIXEL_SIZE_CHANGED,
+            => {
+                // Drawing posts events of its own on some backends; one level
+                // is all this needs.
+                if (self.in_window_event) return true;
+                self.in_window_event = true;
+                defer self.in_window_event = false;
+                self.applyGeometry();
+                self.render();
+            },
+            else => {},
+        }
+        return true;
+    }
+
     pub fn run(self: *App) void {
+        // Installed here rather than in `init`: this is the first point at
+        // which the app is at the address it will keep.
+        sdl.addEventWatch(onWindowEvent, self);
+        defer sdl.removeEventWatch(onWindowEvent, self);
+
         while (self.running) {
             const had_input = self.pumpEvents();
             // The echo is what the user is waiting to see, so give it the
@@ -1149,6 +1196,27 @@ fn expectKey(key: u32, mods: u16, expected: []const u8) !void {
     var buf: [16]u8 = undefined;
     const out = encodeKey(key, mods, &buf) orelse return error.NoBytes;
     try testing.expectEqualSlices(u8, expected, out);
+}
+
+test "the backbuffer density rounds rather than truncates" {
+    // A window being dragged does not always report a backbuffer that is an
+    // exact multiple of its size in points. Truncating there reported 1x for
+    // what is plainly a 2x display, which swapped the glyph atlas for the
+    // low-density set and swapped it back on the next event -- the flicker.
+    try testing.expectEqual(@as(u32, 2), App.densityFor(1602, 801));
+    try testing.expectEqual(@as(u32, 2), App.densityFor(1601, 801));
+    try testing.expectEqual(@as(u32, 2), App.densityFor(1603, 801));
+    try testing.expectEqual(@as(u32, 1), App.densityFor(800, 800));
+    try testing.expectEqual(@as(u32, 3), App.densityFor(2400, 800));
+}
+
+test "a nonsensical window size still yields a usable density" {
+    try testing.expectEqual(@as(u32, 1), App.densityFor(0, 0));
+    try testing.expectEqual(@as(u32, 1), App.densityFor(-4, 800));
+    try testing.expectEqual(@as(u32, 1), App.densityFor(1600, 0));
+    try testing.expectEqual(@as(u32, 1), App.densityFor(1600, -800));
+    // Never below 1x, however small the backbuffer is reported to be.
+    try testing.expectEqual(@as(u32, 1), App.densityFor(1, 800));
 }
 
 test "no plain letter or digit is stolen from the shell" {

@@ -128,6 +128,24 @@ test "resize does not fail on a live pty" {
     try pty.write("x\n");
 }
 
+test "the pty remembers its size and ignores a repeat of it" {
+    // Every window event recomputes the geometry, and most of them arrive at
+    // the size the child already has. Telling it again raises SIGWINCH, which
+    // makes the shell repaint its prompt -- a visible blink for nothing.
+    var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);
+    defer pty.close();
+    try testing.expectEqual(@as(u16, 80), pty.cols);
+    try testing.expectEqual(@as(u16, 24), pty.rows);
+
+    pty.resize(80, 24); // no change: nothing to tell the child
+    try testing.expectEqual(@as(u16, 80), pty.cols);
+
+    pty.resize(100, 30);
+    try testing.expectEqual(@as(u16, 100), pty.cols);
+    try testing.expectEqual(@as(u16, 30), pty.rows);
+    try pty.write("x\n");
+}
+
 test "spawnShell starts the user's shell and it responds" {
     var pty = try Pty.spawnShell(80, 24);
     defer pty.close();
