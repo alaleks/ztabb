@@ -360,6 +360,33 @@ fn fileExists(path: [*:0]const u8) bool {
 
 const testing = std.testing;
 
+test "closing a child that holds SIGHUP still returns, and still kills it" {
+    // The hang-up is a request, and a program is entitled to refuse it: a
+    // shell with `trap '' HUP` set, or one waiting on a foreground job that
+    // ignores it. `close` used to wait for such a child for ever, which froze
+    // the window on the key that closes a pane and again on the way out.
+    //
+    // It lives here rather than beside the cross-platform pty tests because it
+    // is about SIGHUP, which only this half of the world has.
+    const argv = [_][*:0]const u8{ "/bin/sh", "-c", "trap '' HUP; while :; do sleep 1; done" };
+    var pty = try Pty.spawn(&argv, &.{}, 80, 24);
+    const child = pty.child;
+
+    // Give the shell time to install the trap, or it dies to the default
+    // action and proves nothing.
+    for (0..200) |_| {
+        var buf: [64]u8 = undefined;
+        _ = pty.read(&buf) catch break;
+        _ = pty.waitReadable(2);
+    }
+
+    pty.close();
+    try testing.expect(pty.exited);
+    // Reaped, so the pid is no longer ours to signal. Anything else means it
+    // was left running.
+    try testing.expect(libc.kill(child, 0) != 0);
+}
+
 test "nameOf splits at the first equals sign" {
     try testing.expectEqualStrings("TERM", nameOf("TERM=xterm-256color"));
     try testing.expectEqualStrings("PATH", nameOf("PATH=/usr/bin:/bin"));

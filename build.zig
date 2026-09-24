@@ -142,12 +142,28 @@ pub fn build(b: *std.Build) void {
     const core_step = b.step("test-core", "Run unit tests that do not need SDL3");
 
     const core_suites = [_][]const u8{
-        "theme",    "font",      "icons", "appicon", "png",
-        "terminal", "highlight", "ssh",   "pty",     "tabs",
-        "macos",
+        "theme",    "font",      "icons",     "appicon", "png",
+        "terminal", "highlight", "ssh",       "pty",     "tabs",
+        "macos",    "panes",     "pty-posix", "pty-windows",
     };
 
-    const suites = [_]struct { name: []const u8, module: *std.Build.Module }{
+    const Suite = struct { name: []const u8, module: *std.Build.Module };
+
+    // The pty has one implementation per platform and neither compiles on the
+    // other -- the POSIX one reaches for `environ` and `openpty`, the Windows
+    // one for ConPTY -- so only the one this target actually uses gets a suite.
+    // Building it here is what keeps the unused half honest: it is the only
+    // place the platform's own file is compiled on its own platform.
+    const pty_impl: Suite = if (target.result.os.tag == .windows)
+        .{ .name = "pty-windows", .module = mod(b, "src/pty_windows.zig", target, optimize) }
+    else blk: {
+        const m = mod(b, "src/pty_posix.zig", target, optimize);
+        // As for `pty_mod`: openpty and login_tty live in libutil on Linux.
+        if (target.result.os.tag == .linux) m.linkSystemLibrary("util", .{});
+        break :blk .{ .name = "pty-posix", .module = m };
+    };
+
+    const suites = [_]Suite{
         .{ .name = "theme", .module = theme_mod },
         .{ .name = "font", .module = font_mod },
         .{ .name = "icons", .module = icons_mod },
@@ -159,7 +175,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "highlight", .module = highlight_mod },
         .{ .name = "ssh", .module = ssh_mod },
         .{ .name = "pty", .module = pty_mod },
-        .{ .name = "pty-posix", .module = mod(b, "src/pty_posix.zig", target, optimize) },
+        pty_impl,
         .{ .name = "tabs", .module = tabs_mod },
         .{ .name = "sdl", .module = sdl_mod },
         .{ .name = "render", .module = render_mod },
