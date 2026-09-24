@@ -466,10 +466,32 @@ pub const Tabs = struct {
 
 const testing = std.testing;
 
-extern "c" fn usleep(usec: c_uint) c_int;
+/// A short sleep, spelled for the platform, as `pty.zig` also has to do it:
+/// `usleep` is POSIX, and `std.Io` is the only thing in std that sleeps now.
+const nap = if (@import("builtin").os.tag == .windows) struct {
+    extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
+    fn ms(n: u32) void {
+        Sleep(n);
+    }
+} else struct {
+    extern "c" fn usleep(usec: c_uint) c_int;
+    fn ms(n: u32) void {
+        _ = usleep(n * 1000);
+    }
+};
+
+/// Sleeps in steps of `POLL_MS` rather than a millisecond at a time.
+///
+/// Windows rounds a sleep up to the timer resolution, about 15ms, so a loop
+/// that naps a millisecond two thousand times is two seconds here and half a
+/// minute there. Asking for ten at a time costs the same two seconds on a
+/// system that honours it and keeps the other within half again of that.
+const POLL_MS: u32 = 10;
+/// Turns of a polling loop, so every wait below is the same two seconds.
+const POLL_TURNS: usize = 200;
 
 fn sleepMs(ms: u32) void {
-    _ = usleep(ms * 1000);
+    nap.ms(ms);
 }
 
 /// A command that echoes its input, spelled for the platform. Tests use this
@@ -728,13 +750,13 @@ test "pty output reaches the tab's screen" {
     try tab.active().pty.write("hello\n");
 
     var found = false;
-    for (0..2000) |_| {
+    for (0..POLL_TURNS) |_| {
         _ = tabs.pumpAll();
         if (tab.active().terminal.cellAt(0, 0).ch == 'h') {
             found = true;
             break;
         }
-        sleepMs(1);
+        sleepMs(POLL_MS);
     }
     try testing.expect(found);
 }
@@ -749,13 +771,13 @@ test "pumpAll drains background tabs too" {
     try bg.active().pty.write("background\n");
 
     var found = false;
-    for (0..2000) |_| {
+    for (0..POLL_TURNS) |_| {
         _ = tabs.pumpAll();
         if (bg.active().terminal.cellAt(0, 0).ch == 'b') {
             found = true;
             break;
         }
-        sleepMs(1);
+        sleepMs(POLL_MS);
     }
     try testing.expect(found);
     try testing.expectEqual(@as(usize, 1), tabs.active_idx);
@@ -785,9 +807,9 @@ test "reapExited closes tabs whose child is gone" {
     tabs.count = 2;
     tabs.active_idx = 1;
 
-    for (0..2000) |_| {
+    for (0..POLL_TURNS) |_| {
         if (tabs.reapExited() > 0) break;
-        sleepMs(1);
+        sleepMs(POLL_MS);
     }
     try testing.expectEqual(@as(usize, 1), tabs.count);
     var name_buf: [MAX_LABEL * 2]u8 = undefined;
@@ -881,13 +903,13 @@ test "an unfocused pane's output still marks the tab as needing a redraw" {
 
     try tab.pane(right).?.pty.write("echo background\n");
     var seen = false;
-    for (0..2000) |_| {
+    for (0..POLL_TURNS) |_| {
         _ = tabs.pumpAll();
         if (tab.anyDirty()) {
             seen = true;
             break;
         }
-        sleepMs(1);
+        sleepMs(POLL_MS);
     }
     try testing.expect(seen);
     // And it is the background pane that is dirty, not the focused one.
@@ -903,10 +925,10 @@ test "keys and output go to the focused pane only" {
 
     const tab = tabs.active().?;
     try tab.active().pty.write("echo pane\n");
-    for (0..2000) |_| {
+    for (0..POLL_TURNS) |_| {
         _ = tabs.pumpAll();
         if (tab.pane(right).?.terminal.cellAt(0, 0).ch != ' ') break;
-        sleepMs(1);
+        sleepMs(POLL_MS);
     }
     // The other pane never saw it.
     try testing.expectEqual(@as(u21, ' '), tab.pane(0).?.terminal.cellAt(0, 0).ch);
