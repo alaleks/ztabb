@@ -132,7 +132,14 @@ jobs:
       # no tests at all as hanging once, and a pure string lexer the next time,
       # which is a misleading thing to read a diagnosis out of. One at a time
       # costs a little wall clock and names the suite that is actually stuck.
+      # Bounded, and on the step rather than the job. A wedged suite does not
+      # stop `zig build` from waiting on it, and with no limit anywhere the run
+      # sits until GitHub's six-hour default -- which is how the diagnostic
+      # below came to never run at all. A job-level timeout would not do: that
+      # cancels, and a cancelled job skips the steps that run `if: failure()`.
+      # A step that times out merely fails, which is what the next one waits for.
       - name: Unit tests
+        timeout-minutes: 12
         run: zig build test -j1
 
       # Runs only when the step above failed.
@@ -149,6 +156,7 @@ jobs:
       # its own or only under the build runner is the thing worth knowing.
       - name: Run each suite standalone
         if: failure()
+        timeout-minutes: 15
         shell: bash
         run: |
           set -u
