@@ -12,7 +12,12 @@ const windows = std.os.windows;
 
 const HANDLE = windows.HANDLE;
 const DWORD = windows.DWORD;
+/// A Win32 `BOOL` is an enum in std rather than an integer, so a call's result
+/// is read with `toBool` rather than compared against zero.
 const BOOL = windows.BOOL;
+/// Declared here because std no longer does: a signed 32-bit status where
+/// `S_OK` is zero.
+const HRESULT = windows.LONG;
 const WORD = windows.WORD;
 const HPCON = *anyopaque;
 
@@ -78,8 +83,8 @@ extern "kernel32" fn CreatePseudoConsole(
     hOutput: HANDLE,
     dwFlags: DWORD,
     phPC: *HPCON,
-) callconv(.winapi) windows.HRESULT;
-extern "kernel32" fn ResizePseudoConsole(hPC: HPCON, size: COORD) callconv(.winapi) windows.HRESULT;
+) callconv(.winapi) HRESULT;
+extern "kernel32" fn ResizePseudoConsole(hPC: HPCON, size: COORD) callconv(.winapi) HRESULT;
 extern "kernel32" fn ClosePseudoConsole(hPC: HPCON) callconv(.winapi) void;
 extern "kernel32" fn InitializeProcThreadAttributeList(
     lpAttributeList: ?*anyopaque,
@@ -190,9 +195,9 @@ pub const Pty = struct {
         var out_write: HANDLE = undefined;
         var in_read: HANDLE = undefined;
         var in_write: HANDLE = undefined;
-        if (CreatePipe(&out_read, &out_write, null, 0) == 0) return error.OpenPtyFailed;
+        if (!CreatePipe(&out_read, &out_write, null, 0).toBool()) return error.OpenPtyFailed;
         errdefer _ = CloseHandle(out_read);
-        if (CreatePipe(&in_read, &in_write, null, 0) == 0) {
+        if (!CreatePipe(&in_read, &in_write, null, 0).toBool()) {
             _ = CloseHandle(out_write);
             return error.OpenPtyFailed;
         }
@@ -220,11 +225,11 @@ pub const Pty = struct {
             return error.OpenPtyFailed;
         errdefer gpa.free(attrs_buf);
         const attrs: *anyopaque = @ptrCast(attrs_buf.ptr);
-        if (InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) == 0) {
+        if (!InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size).toBool()) {
             return error.OpenPtyFailed;
         }
         errdefer DeleteProcThreadAttributeList(attrs);
-        if (UpdateProcThreadAttribute(
+        if (!UpdateProcThreadAttribute(
             attrs,
             0,
             PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
@@ -232,7 +237,7 @@ pub const Pty = struct {
             @sizeOf(HPCON),
             null,
             null,
-        ) == 0) return error.OpenPtyFailed;
+        ).toBool()) return error.OpenPtyFailed;
 
         var si = std.mem.zeroes(STARTUPINFOEXW);
         si.StartupInfo.cb = @sizeOf(STARTUPINFOEXW);
@@ -244,18 +249,18 @@ pub const Pty = struct {
         cmdline[n] = 0;
 
         var pi = std.mem.zeroes(PROCESS_INFORMATION);
-        if (CreateProcessW(
+        if (!CreateProcessW(
             null,
             @ptrCast(&cmdline),
             null,
             null,
-            0, // handles reach the child through the attribute, not inheritance
+            .FALSE, // handles reach the child through the attribute, not inheritance
             EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
             null,
             null,
             &si,
             &pi,
-        ) == 0) return error.ForkFailed;
+        ).toBool()) return error.ForkFailed;
 
         return .{
             .out_read = out_read,
@@ -283,14 +288,14 @@ pub const Pty = struct {
     /// until something arrives, which would stall the render loop.
     pub fn read(self: *Pty, buf: []u8) error{Closed}!usize {
         var available: DWORD = 0;
-        if (PeekNamedPipe(self.out_read, null, 0, null, &available, null) == 0) {
+        if (!PeekNamedPipe(self.out_read, null, 0, null, &available, null).toBool()) {
             return error.Closed;
         }
         if (available == 0) return 0;
 
         var got: DWORD = 0;
         const want: DWORD = @intCast(@min(buf.len, available));
-        if (ReadFile(self.out_read, buf.ptr, want, &got, null) == 0) return error.Closed;
+        if (!ReadFile(self.out_read, buf.ptr, want, &got, null).toBool()) return error.Closed;
         if (got == 0) return error.Closed;
         return got;
     }
@@ -300,7 +305,7 @@ pub const Pty = struct {
         while (off < buf.len) {
             var put: DWORD = 0;
             const want: DWORD = @intCast(@min(buf.len - off, std.math.maxInt(DWORD)));
-            if (WriteFile(self.in_write, buf[off..].ptr, want, &put, null) == 0) {
+            if (!WriteFile(self.in_write, buf[off..].ptr, want, &put, null).toBool()) {
                 return error.Closed;
             }
             if (put == 0) return error.Closed;
@@ -317,7 +322,7 @@ pub const Pty = struct {
         var waited: i32 = 0;
         while (waited <= timeout_ms) {
             var available: DWORD = 0;
-            if (PeekNamedPipe(self.out_read, null, 0, null, &available, null) == 0) return false;
+            if (!PeekNamedPipe(self.out_read, null, 0, null, &available, null).toBool()) return false;
             if (available > 0) return true;
             Sleep(1);
             waited += 1;
@@ -339,7 +344,7 @@ pub const Pty = struct {
     pub fn poll(self: *Pty) bool {
         if (self.exited) return true;
         var code: DWORD = 0;
-        if (GetExitCodeProcess(self.process, &code) == 0) return false;
+        if (!GetExitCodeProcess(self.process, &code).toBool()) return false;
         if (code == STILL_ACTIVE) return false;
         self.exited = true;
         self.exit_status = code;
