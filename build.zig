@@ -142,8 +142,8 @@ pub fn build(b: *std.Build) void {
     const core_step = b.step("test-core", "Run unit tests that do not need SDL3");
 
     const core_suites = [_][]const u8{
-        "theme",    "font",      "icons",     "appicon", "png",
-        "terminal", "highlight", "ssh",       "pty",     "tabs",
+        "theme",    "font",      "icons",     "appicon",     "png",
+        "terminal", "highlight", "ssh",       "pty",         "tabs",
         "macos",    "panes",     "pty-posix", "pty-windows",
     };
 
