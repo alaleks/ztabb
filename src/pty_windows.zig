@@ -29,6 +29,19 @@ const WAIT_OBJECT_0: DWORD = 0;
 /// How long a closing pane gives its child before insisting. The POSIX side
 /// gives it the same.
 const GRACE_MS: DWORD = 200;
+/// The buffer for the pipe the console host writes into.
+///
+/// It matters more than a pipe size usually does. Every ConPTY call -- a
+/// resize, a close -- can block while this pipe is full, because the host is
+/// mid-write and cannot be interrupted, and ztabb drains a bounded amount per
+/// frame by design. The buffer therefore has to absorb whatever the host emits
+/// between two drains, and a full repaint of a large window is a great deal
+/// more than the few kilobytes `CreatePipe` gives by default.
+///
+/// This lowers the odds of that stall; it does not remove it. Removing it takes
+/// a reader thread that drains the pipe continuously, which is what a ConPTY
+/// front end really wants.
+const OUT_PIPE_BYTES: DWORD = 1 << 20;
 const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x00080000;
 const CREATE_UNICODE_ENVIRONMENT: DWORD = 0x00000400;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
@@ -201,7 +214,7 @@ pub const Pty = struct {
         var out_write: HANDLE = undefined;
         var in_read: HANDLE = undefined;
         var in_write: HANDLE = undefined;
-        if (!CreatePipe(&out_read, &out_write, null, 0).toBool()) return error.OpenPtyFailed;
+        if (!CreatePipe(&out_read, &out_write, null, OUT_PIPE_BYTES).toBool()) return error.OpenPtyFailed;
         errdefer _ = CloseHandle(out_read);
         if (!CreatePipe(&in_read, &in_write, null, 0).toBool()) {
             _ = CloseHandle(out_write);
