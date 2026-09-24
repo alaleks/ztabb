@@ -23,6 +23,12 @@ const HPCON = *anyopaque;
 
 const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
 const STILL_ACTIVE: DWORD = 259;
+/// `WaitForSingleObject` returning this means the handle was signalled;
+/// anything else is a timeout or a failure.
+const WAIT_OBJECT_0: DWORD = 0;
+/// How long a closing pane gives its child before insisting. The POSIX side
+/// gives it the same.
+const GRACE_MS: DWORD = 200;
 const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x00080000;
 const CREATE_UNICODE_ENVIRONMENT: DWORD = 0x00000400;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
@@ -351,20 +357,39 @@ pub const Pty = struct {
         return true;
     }
 
+    /// Hangs the child up and tears the console down, without ever blocking
+    /// indefinitely.
+    ///
+    /// The order here matters, and it is not the order it reads most naturally
+    /// in. `ClosePseudoConsole` waits for the console host to finish flushing
+    /// what it has written, and if nobody is draining the output pipe it waits
+    /// for ever -- the pipe fills, the host's write blocks, and the close waits
+    /// on a write that cannot complete. ztabb drains a bounded amount per frame
+    /// on purpose, so a pane being closed usually does have output still in
+    /// flight; closing the console first was a deadlock waiting for a busy
+    /// pane, on the thread that draws.
+    ///
+    /// Closing our ends of the pipes first is what lets the host unwind: its
+    /// pending writes fail, and the child sees end of file on its input, which
+    /// is the hang-up a real terminal performs. Only then is the console itself
+    /// closed, and the wait for the child bounded the way the POSIX side is.
     pub fn close(self: *Pty) void {
-        // Closing the console asks the child to finish, as a hang-up does on a
-        // real terminal; it is killed only if it will not.
+        _ = CloseHandle(self.in_write);
+        _ = CloseHandle(self.out_read);
         ClosePseudoConsole(self.console);
+
         if (!self.exited) {
-            if (WaitForSingleObject(self.process, 200) != 0) {
+            if (WaitForSingleObject(self.process, GRACE_MS) != WAIT_OBJECT_0) {
                 _ = TerminateProcess(self.process, 1);
+                // Bounded even after a kill: a process being torn down by the
+                // kernel still takes a moment to become signalled.
+                _ = WaitForSingleObject(self.process, GRACE_MS);
             }
             self.exited = true;
         }
+
         if (self.attrs) |a| DeleteProcThreadAttributeList(a);
         self.gpa.free(self.attrs_buf);
-        _ = CloseHandle(self.in_write);
-        _ = CloseHandle(self.out_read);
         _ = CloseHandle(self.thread);
         _ = CloseHandle(self.process);
     }
