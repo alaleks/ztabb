@@ -33,3 +33,6 @@ zig-out/
 
 # Generated app bundle artifacts
 *.iconset/
+
+# Local install
+install-macos.sh
