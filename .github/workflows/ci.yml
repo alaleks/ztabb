@@ -98,6 +98,22 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
+          # Provisional, and here to answer a question rather than to stay.
+          #
+          # This action restores `.zig-cache` between runs, and the test
+          # binaries the runner executes come straight out of it -- the failing
+          # command names a path under `.zig-cache/o/`. One earlier run on this
+          # job was cancelled part-way. Whatever a half-finished run leaves in
+          # that directory, every later run then inherits, and that is the only
+          # thing on this platform that could make a suite of pure arithmetic
+          # sit for a minute without answering: `png` encodes bytes, it opens
+          # no file, starts no process and touches no pty.
+          #
+          # A cold cache tells us which it is. If the job goes green, the
+          # binaries were the problem and caching can come back with a fresh
+          # key. If it still wedges, the cache was innocent and the fault is
+          # ztabb's, on ground we have not yet looked at.
+          use-cache: false
 
       # SDL3 from vcpkg, which is already on the runner image.
       - name: Install SDL3
@@ -119,45 +135,43 @@ jobs:
       - name: Unit tests
         run: zig build test -j1
 
-      # Runs only when the step above failed, which on this platform means a
-      # suite wedged rather than a test having an opinion.
+      # Runs only when the step above failed.
       #
-      # The trick is to run the test binary directly instead of through the
+      # The trick is to run each test binary directly instead of through the
       # build runner. Standalone, the runner prints each test's name *before*
       # running it -- "8/12 tabs.test.whatever..." -- and appends OK when it
-      # returns. So the last line with no OK after it is the test that did not
-      # come back. Through `zig build` that same output is a protocol on a pipe
-      # and never reaches the log, which is why a minute of silence was all we
-      # ever got.
+      # returns, so the last line with no OK after it is the test that did not
+      # come back. Through `zig build` that output is a protocol on a pipe and
+      # never reaches the log, which is why a minute of silence was all we got.
       #
-      # `tabs` is the suite that does it here; if the log ever names a different
-      # one, point this at that.
-      - name: Name the test that hangs
+      # Every suite, not only the one the log named: which suite wedges has
+      # moved around between runs, and knowing whether a binary misbehaves on
+      # its own or only under the build runner is the thing worth knowing.
+      - name: Run each suite standalone
         if: failure()
         shell: bash
         run: |
           set -u
-          exe=$(find .zig-cache -name 'tabs.exe' -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
-          if [ -z "$exe" ]; then
-            echo "no tabs.exe in the cache; nothing to run"
-            exit 1
-          fi
-          echo "running $exe standalone"
-          "$exe" > tabs-run.log 2>&1 &
-          pid=$!
-          waited=0
-          while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 150 ]; do
-            sleep 1
-            waited=$((waited + 1))
+          for name in theme font icons appicon png panes macos terminal highlight ssh pty tabs; do
+            exe=$(find .zig-cache -name "$name.exe" -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+            if [ -z "$exe" ]; then
+              printf '%-10s no binary in the cache\n' "$name"
+              continue
+            fi
+            "$exe" > "run-$name.log" 2>&1 &
+            pid=$!
+            waited=0
+            while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 90 ]; do
+              sleep 1
+              waited=$((waited + 1))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              kill -9 "$pid" 2>/dev/null || true
+              printf '%-10s WEDGED after %ss -- last line: %s\n' "$name" "$waited" "$(tail -1 "run-$name.log")"
+            else
+              printf '%-10s %ss: %s\n' "$name" "$waited" "$(tail -1 "run-$name.log")"
+            fi
           done
-          if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-            printf '\nstill running after %ss, killed it\n' "$waited"
-          else
-            printf '\nfinished on its own after %ss\n' "$waited"
-          fi
-          printf '\n--- the tail is the answer: a name with no OK after it ---\n'
-          tail -25 tabs-run.log
           exit 1
 
   cross:
