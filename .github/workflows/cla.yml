@@ -8,6 +8,10 @@ name: CLA
 #   2. Add it as the repository secret `CLA_TOKEN`.
 # Until that secret exists the job is a no-op rather than a failing check, so
 # pull requests are never blocked by a half-configured workflow.
+#
+# Note the detour through `env` below: `secrets` is not one of the contexts
+# available to an `if:`, so testing it there is an invalid expression and the
+# run fails without starting a job at all.
 
 on:
   issue_comment:
@@ -24,10 +28,14 @@ permissions:
 jobs:
   cla:
     runs-on: ubuntu-latest
+    # Job-level `env` may read `secrets`, and `env` is available to `if`, which
+    # is the way to make a step conditional on whether a secret is set.
+    env:
+      configured: ${{ secrets.CLA_TOKEN != '' }}
     steps:
       - name: Check CLA signature
         if: >-
-          ${{ secrets.CLA_TOKEN != ''
+          ${{ env.configured == 'true'
               && (github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
                   || github.event_name == 'pull_request_target') }}
         uses: contributor-assistant/github-action@v2.6.1
