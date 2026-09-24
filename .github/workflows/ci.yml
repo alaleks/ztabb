@@ -144,29 +144,42 @@ jobs:
 
       # Runs only when the step above failed.
       #
-      # The trick is to run each test binary directly instead of through the
-      # build runner. Standalone, the runner prints each test's name *before*
-      # running it -- "8/12 tabs.test.whatever..." -- and appends OK when it
-      # returns, so the last line with no OK after it is the test that did not
-      # come back. Through `zig build` that output is a protocol on a pipe and
-      # never reaches the log, which is why a minute of silence was all we got.
+      # A test binary run through `zig build` talks to the build runner over a
+      # pipe, so its per-test progress is protocol and never reaches the log:
+      # the suite that wedges is killed having said nothing about where it was,
+      # which is why three runs gave nothing but a minute of silence. Run
+      # directly, the same binary prints each test's name before running it and
+      # appends OK when it returns -- so the last line with no OK after it is
+      # the test that did not come back.
       #
-      # Every suite, not only the one the log named: which suite wedges has
-      # moved around between runs, and knowing whether a binary misbehaves on
-      # its own or only under the build runner is the thing worth knowing.
+      # `zig build test-bin` puts the binaries at a path worth naming. The
+      # previous attempt at this dug them out of .zig-cache, which fails exactly
+      # when it matters: the step above is killed at twelve minutes, so the
+      # suites it had not reached were never built, and `xargs ls -t` over an
+      # empty `find` runs `ls` on the working directory instead of nothing --
+      # every missing binary came back as whichever log file had been written
+      # last.
+      #
+      # Every suite, not only the one the log named: which one wedges has moved
+      # between runs, and whether a binary misbehaves on its own or only under
+      # the build runner is the thing worth knowing. The three that link SDL3
+      # are left out, since they need its DLL beside them to start at all.
       - name: Run each suite standalone
         if: failure()
         timeout-minutes: 15
         shell: bash
         run: |
           set -u
+          zig build test-bin -j1 || echo "note: not every suite could be built"
+          logs="$RUNNER_TEMP/standalone"
+          mkdir -p "$logs"
           for name in theme font icons appicon png panes macos terminal highlight ssh pty tabs; do
-            exe=$(find .zig-cache -name "$name.exe" -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
-            if [ -z "$exe" ]; then
-              printf '%-10s no binary in the cache\n' "$name"
+            exe="zig-out/test/$name.exe"
+            if [ ! -f "$exe" ]; then
+              printf '%-10s not built\n' "$name"
               continue
             fi
-            "$exe" > "run-$name.log" 2>&1 &
+            "$exe" > "$logs/$name.log" 2>&1 &
             pid=$!
             waited=0
             while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 90 ]; do
@@ -175,9 +188,10 @@ jobs:
             done
             if kill -0 "$pid" 2>/dev/null; then
               kill -9 "$pid" 2>/dev/null || true
-              printf '%-10s WEDGED after %ss -- last line: %s\n' "$name" "$waited" "$(tail -1 "run-$name.log")"
+              printf '%-10s WEDGED after %ss, last line: %s\n' \
+                "$name" "$waited" "$(tail -1 "$logs/$name.log")"
             else
-              printf '%-10s %ss: %s\n' "$name" "$waited" "$(tail -1 "run-$name.log")"
+              printf '%-10s %ss: %s\n' "$name" "$waited" "$(tail -1 "$logs/$name.log")"
             fi
           done
           exit 1

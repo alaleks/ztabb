@@ -143,6 +143,16 @@ pub fn build(b: *std.Build) void {
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this");
 
     const test_step = b.step("test", "Run unit tests");
+    // Builds the suites and puts them somewhere nameable, without running any.
+    //
+    // A test binary run through `zig build` talks to the build runner over a
+    // pipe, so its per-test progress is protocol and never reaches a log: a
+    // suite that stops answering is killed having said nothing about where it
+    // was. Run directly, the same binary prints each test's name before it runs
+    // it, which is the only way to find out. This step is how CI gets hold of
+    // one -- digging through .zig-cache for it works until the build was cut
+    // short and the binary is not there.
+    const test_bin_step = b.step("test-bin", "Build the test binaries without running them");
     // Everything but the SDL-facing modules, so a machine without SDL3 can
     // still check the terminal, the pty, the typeface and the parsers.
     const core_step = b.step("test-core", "Run unit tests that do not need SDL3");
@@ -191,5 +201,10 @@ pub fn build(b: *std.Build) void {
         for (core_suites) |core| {
             if (std.mem.eql(u8, core, s.name)) core_step.dependOn(run);
         }
+
+        const installed = b.addInstallArtifact(t, .{
+            .dest_dir = .{ .override = .{ .custom = "test" } },
+        });
+        test_bin_step.dependOn(&installed.step);
     }
 }
