@@ -108,8 +108,16 @@ jobs:
 
       # The pty here is ConPTY, a different implementation behind the same
       # API, so only a Windows run exercises it.
+      #
+      # Serially, on this platform only. `zig build` runs test binaries
+      # concurrently, and the runner declares a step failed when it has not
+      # heard from it for a minute -- so one suite that wedges takes down
+      # whatever happened to be in flight beside it. That reported a suite with
+      # no tests at all as hanging once, and a pure string lexer the next time,
+      # which is a misleading thing to read a diagnosis out of. One at a time
+      # costs a little wall clock and names the suite that is actually stuck.
       - name: Unit tests
-        run: zig build test
+        run: zig build test -j1
 
   cross:
     name: Cross-compile ${{ matrix.target }}

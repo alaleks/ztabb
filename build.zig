@@ -136,6 +136,12 @@ pub fn build(b: *std.Build) void {
     const bundle_step = b.step("bundle", "Build zig-out/ztabb.app");
     bundle_step.dependOn(&bundle.step);
 
+    // Narrows every suite to the tests whose name contains this, which is how
+    // a suite that hangs somewhere in the middle gets bisected down to the test
+    // that does it -- a test binary killed for not responding says nothing
+    // about where it was.
+    const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this");
+
     const test_step = b.step("test", "Run unit tests");
     // Everything but the SDL-facing modules, so a machine without SDL3 can
     // still check the terminal, the pty, the typeface and the parsers.
@@ -175,7 +181,11 @@ pub fn build(b: *std.Build) void {
     };
     for (suites) |s| {
         if (std.mem.eql(u8, s.name, "pty-posix") and target.result.os.tag == .windows) continue;
-        const t = b.addTest(.{ .name = s.name, .root_module = s.module });
+        const t = b.addTest(.{
+            .name = s.name,
+            .root_module = s.module,
+            .filters = if (test_filter) |f| &.{f} else &.{},
+        });
         const run = &b.addRunArtifact(t).step;
         test_step.dependOn(run);
         for (core_suites) |core| {
