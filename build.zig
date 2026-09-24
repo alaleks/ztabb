@@ -82,6 +82,13 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("app", app_mod);
 
     const exe = b.addExecutable(.{ .name = "ztabb", .root_module = main_mod });
+    // `tools/bundle.sh` rewrites the SDL3 load path to one inside the bundle,
+    // and a Mach-O header has only the padding the linker left it. On arm64 the
+    // Homebrew path it replaces happens to be about as long, so it fits; on
+    // x86_64 Homebrew lives under /usr/local, the replacement is longer, and
+    // install_name_tool refuses -- "larger updated load commands do not fit".
+    // Reserving the room up front is the fix it asks for.
+    if (target.result.os.tag.isDarwin()) exe.headerpad_max_install_names = true;
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
