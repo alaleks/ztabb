@@ -24,6 +24,24 @@ pub const defaultShell = impl.defaultShell;
 const testing = std.testing;
 const posix_only = builtin.os.tag != .windows;
 
+/// A short sleep, spelled for the platform. `std.Io` is the only thing in std
+/// that sleeps now, and it wants an event loop these tests have no use for.
+const nap = if (builtin.os.tag == .windows) struct {
+    extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
+    fn ms(n: u32) void {
+        Sleep(n);
+    }
+} else struct {
+    extern "c" fn usleep(usec: c_uint) c_int;
+    fn ms(n: u32) void {
+        _ = usleep(n * 1000);
+    }
+};
+
+fn sleepMs(ms: u32) void {
+    nap.ms(ms);
+}
+
 /// A command that prints and exits, spelled for the platform.
 fn echoArgv() []const [*:0]const u8 {
     return if (posix_only)
@@ -183,18 +201,38 @@ test "spawnShell starts the user's shell and it responds" {
     // `exit` then proves it is reading and can be reaped.
     try pty.write("exit\r");
 
+    // Drain until the shell stops talking, however the platform words that.
     var buf: [4096]u8 = undefined;
     var total: usize = 0;
-    var exited = false;
     for (0..4000) |_| {
         const n = pty.read(&buf) catch break;
         total += n;
+        if (n == 0) {
+            if (pty.poll()) break;
+            _ = pty.waitReadable(1);
+        }
+    }
+    try testing.expect(total > 0);
+
+    // Then wait for it to become reapable, as a step of its own.
+    //
+    // The two are not the same event and do not arrive in a fixed order: macOS
+    // reports the master's hang-up as an error on the read, Linux as end of
+    // file, and either can land before the child has a status to collect. The
+    // drain above used to carry this assertion, so whichever of the two came
+    // first ended the search -- on Linux the hang-up did, `waitReadable`
+    // stopped waiting once the master was hung up, and the loop spent its four
+    // thousand turns in microseconds before the shell was reapable at all.
+    var exited = false;
+    // Five seconds of ceiling, reached in a millisecond or two in practice. A
+    // loaded CI runner is the one place this has to be generous, and waiting
+    // costs nothing when the answer arrives at once.
+    for (0..5000) |_| {
         if (pty.poll()) {
             exited = true;
             break;
         }
-        if (n == 0) _ = pty.waitReadable(1);
+        sleepMs(1);
     }
-    try testing.expect(total > 0);
     try testing.expect(exited);
 }
