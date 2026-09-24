@@ -1125,12 +1125,12 @@ pub const Terminal = struct {
         self.wrap_pending = false;
         switch (final) {
             'A' => self.cursor_row -|= self.param(0, 1),
-            'B' => self.cursor_row = @min(self.rows - 1, self.cursor_row + self.param(0, 1)),
-            'C' => self.cursor_col = @min(self.cols - 1, self.cursor_col + self.param(0, 1)),
+            'B' => self.cursor_row = @min(self.rows - 1, self.cursor_row +| self.param(0, 1)),
+            'C' => self.cursor_col = @min(self.cols - 1, self.cursor_col +| self.param(0, 1)),
             'D' => self.cursor_col -|= self.param(0, 1),
             'E' => { // CNL
                 self.cursor_col = 0;
-                self.cursor_row = @min(self.rows - 1, self.cursor_row + self.param(0, 1));
+                self.cursor_row = @min(self.rows - 1, self.cursor_row +| self.param(0, 1));
             },
             'F' => { // CPL
                 self.cursor_col = 0;
@@ -1149,8 +1149,13 @@ pub const Terminal = struct {
             'P' => self.deleteChars(self.param(0, 1)),
             'X' => self.eraseChars(self.param(0, 1)),
             '@' => self.insertChars(self.param(0, 1)),
-            'S' => for (0..self.param(0, 1)) |_| self.scrollUp(),
-            'T' => for (0..self.param(0, 1)) |_| self.scrollDown(),
+            // Clamped to the height: scrolling a region by more lines than it
+            // holds leaves it blank, and every further turn only pushes one
+            // more blank line into the history. Taken literally, an absurd
+            // parameter asked for four billion of them, and since this runs on
+            // the thread that draws, the window simply stopped responding.
+            'S' => for (0..@min(self.param(0, 1), self.rows)) |_| self.scrollUp(),
+            'T' => for (0..@min(self.param(0, 1), self.rows)) |_| self.scrollDown(),
             'm' => self.applySgr(),
             'r' => {
                 const top = self.param(0, 1) - 1;
@@ -2130,6 +2135,53 @@ test "xterm256 covers the cube and the grey ramp" {
     try testing.expectEqual(@as(u32, 0xFFFFFF), Terminal.xterm256(231, &theme.dark));
     try testing.expectEqual(@as(u32, 0x080808), Terminal.xterm256(232, &theme.dark));
     try testing.expectEqual(@as(u32, 0xEEEEEE), Terminal.xterm256(255, &theme.dark));
+}
+
+test "an absurd cursor-movement parameter clamps instead of overflowing" {
+    // The CSI parser saturates a runaway number at maxInt(u32) rather than
+    // wrapping it. Adding that to the cursor position then overflowed, which
+    // is a panic in a checked build and a nonsense position in a fast one --
+    // and any program's output can ask for it, a remote shell included.
+    var t = try testTerm(10, 4);
+    defer t.deinit();
+
+    t.write("\x1b[4294967295B"); // CUD
+    try testing.expectEqual(@as(u32, 3), t.cursor_row);
+
+    t.write("\x1b[4294967295C"); // CUF
+    try testing.expectEqual(@as(u32, 9), t.cursor_col);
+
+    t.write("\x1b[H\x1b[4294967295E"); // CNL
+    try testing.expectEqual(@as(u32, 3), t.cursor_row);
+    try testing.expectEqual(@as(u32, 0), t.cursor_col);
+
+    // And the same from a position that is already part-way down.
+    t.write("\x1b[2;5H\x1b[4294967290B\x1b[4294967290C");
+    try testing.expectEqual(@as(u32, 3), t.cursor_row);
+    try testing.expectEqual(@as(u32, 9), t.cursor_col);
+}
+
+test "an absurd scroll parameter blanks the screen rather than hanging" {
+    // `for (0..param)` took the number literally: four billion scrolls on the
+    // thread that draws, which is a frozen window. The result of scrolling a
+    // region further than its own height is the same blank region either way.
+    var t = try testTerm(4, 3);
+    defer t.deinit();
+    t.write("ab\r\ncd\r\nef");
+
+    t.write("\x1b[4294967295S");
+    for (0..t.rows) |r| {
+        for (0..t.cols) |c| {
+            try testing.expectEqual(@as(u21, ' '), t.cellAt(@intCast(r), @intCast(c)).ch);
+        }
+    }
+
+    t.write("gh\x1b[4294967295T");
+    for (0..t.rows) |r| {
+        for (0..t.cols) |c| {
+            try testing.expectEqual(@as(u21, ' '), t.cellAt(@intCast(r), @intCast(c)).ch);
+        }
+    }
 }
 
 test "mouse reporting modes are tracked" {
