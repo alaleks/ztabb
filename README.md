@@ -52,6 +52,40 @@ Bundling is what clause 2 allows, on condition every copy carries the licence,
 which is why `licenses/JetBrainsMono-OFL.txt` ships in the repository and again
 inside `ztabb.app`. `NOTICE` spells out how each clause is met.
 
+## Download
+
+Every tagged release carries prebuilt binaries, so Zig and a build step are not
+needed to run ztabb — take the file for your machine from the
+[latest release](https://github.com/alaleks/ztabb/releases/latest):
+
+| File                        | For                                          |
+| --------------------------- | -------------------------------------------- |
+| `ztabb-aarch64-macos.zip`   | macOS, Apple Silicon — a ready `ztabb.app`    |
+| `ztabb-x86_64-macos.zip`    | macOS, Intel — a ready `ztabb.app`            |
+| `ztabb-x86_64-linux.tar.gz` | Linux x86_64 — the binary and its licences    |
+
+`checksums.txt` beside them holds the SHA-256 of each file.
+
+**macOS.** Unzip and move `ztabb.app` to `/Applications`. The bundle carries its
+own copy of SDL3, so there is nothing else to install. It is ad-hoc signed
+rather than signed with a Developer ID, so a downloaded copy arrives
+quarantined: on first launch either right-click the app and choose **Open**, or
+clear the flag first.
+
+```sh
+xattr -dr com.apple.quarantine /Applications/ztabb.app
+```
+
+**Linux.** The tarball holds the binary and the licences; SDL3 comes from the
+system, since the release links against it (`libsdl3-0`, `sdl3`, or whatever the
+distribution calls the runtime — `tools/install-sdl3-linux.sh` will fetch it).
+
+There is no Windows release yet. It builds and its tests run in CI, but no
+binary is published, so Windows means building from source for now.
+
+Building it yourself is worth it only if you want to change something, or want a
+macOS app that is not quarantined — the rest of this section is for that.
+
 ## Requirements
 
 - Zig 0.16.0
@@ -62,7 +96,7 @@ inside `ztabb.app`. `NOTICE` spells out how each clause is met.
 ```sh
 zig build                       # build
 zig build run                   # build and run
-zig build test                  # 349 unit tests
+zig build test                  # 386 unit tests
 zig build -Doptimize=ReleaseFast
 
 zig build bundle                # zig-out/ztabb.app, with its icon (macOS)
