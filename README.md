@@ -54,8 +54,19 @@ inside `ztabb.app`. `NOTICE` spells out how each clause is met.
 
 ## Download
 
-Every tagged release carries prebuilt binaries, so Zig and a build step are not
-needed to run ztabb — take the file for your machine from the
+Zig and a build step are not needed to run ztabb. The installer picks the
+release built for your machine, checks it against the published SHA-256, and
+puts it where the platform expects it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alaleks/ztabb/master/install.sh | sh
+```
+
+It reads two variables: `ZTABB_VERSION` to pin a tag rather than take the
+latest, and `ZTABB_PREFIX` to install somewhere other than `/Applications` on
+macOS or `/usr/local` on Linux.
+
+Or take the file for your machine by hand, from the
 [latest release](https://github.com/alaleks/ztabb/releases/latest):
 
 | File                        | For                                          |
@@ -70,7 +81,7 @@ needed to run ztabb — take the file for your machine from the
 own copy of SDL3, so there is nothing else to install. It is ad-hoc signed
 rather than signed with a Developer ID, so a downloaded copy arrives
 quarantined: on first launch either right-click the app and choose **Open**, or
-clear the flag first.
+clear the flag first. (The installer above does this for you.)
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/ztabb.app
