@@ -119,6 +119,47 @@ jobs:
       - name: Unit tests
         run: zig build test -j1
 
+      # Runs only when the step above failed, which on this platform means a
+      # suite wedged rather than a test having an opinion.
+      #
+      # The trick is to run the test binary directly instead of through the
+      # build runner. Standalone, the runner prints each test's name *before*
+      # running it -- "8/12 tabs.test.whatever..." -- and appends OK when it
+      # returns. So the last line with no OK after it is the test that did not
+      # come back. Through `zig build` that same output is a protocol on a pipe
+      # and never reaches the log, which is why a minute of silence was all we
+      # ever got.
+      #
+      # `tabs` is the suite that does it here; if the log ever names a different
+      # one, point this at that.
+      - name: Name the test that hangs
+        if: failure()
+        shell: bash
+        run: |
+          set -u
+          exe=$(find .zig-cache -name 'tabs.exe' -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+          if [ -z "$exe" ]; then
+            echo "no tabs.exe in the cache; nothing to run"
+            exit 1
+          fi
+          echo "running $exe standalone"
+          "$exe" > tabs-run.log 2>&1 &
+          pid=$!
+          waited=0
+          while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 150 ]; do
+            sleep 1
+            waited=$((waited + 1))
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+            printf '\nstill running after %ss, killed it\n' "$waited"
+          else
+            printf '\nfinished on its own after %ss\n' "$waited"
+          fi
+          printf '\n--- the tail is the answer: a name with no OK after it ---\n'
+          tail -25 tabs-run.log
+          exit 1
+
   cross:
     name: Cross-compile ${{ matrix.target }}
     runs-on: ubuntu-latest
