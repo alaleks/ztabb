@@ -228,12 +228,24 @@ pub const Pty = struct {
         _ = SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0);
         _ = SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0);
 
+        // The pseudo-console's own ends of the pipes have to outlive the call
+        // that creates the child, not merely the one that creates the console.
+        // Microsoft's sample is explicit about it -- "close these after
+        // CreateProcess of child application with pseudoconsole object" -- and
+        // closing them a few lines earlier, as this did, left the client with
+        // no console to attach to. It fell back to the one this process already
+        // had: its output went to our own stdout, writes to the input pipe
+        // reached nobody, and the only thing ever to come back down the pipe
+        // was conhost's own sixteen-byte handshake. On a terminal that means a
+        // window that shows nothing a program prints.
+        defer {
+            _ = CloseHandle(in_read);
+            _ = CloseHandle(out_write);
+        }
+
         var console: HPCON = undefined;
         const size = COORD{ .x = @intCast(@max(cols, 1)), .y = @intCast(@max(rows, 1)) };
         const hr = CreatePseudoConsole(size, in_read, out_write, 0, &console);
-        // The console keeps its own copies of the far ends.
-        _ = CloseHandle(in_read);
-        _ = CloseHandle(out_write);
         if (hr != 0) return error.OpenPtyFailed;
         errdefer ClosePseudoConsole(console);
 
