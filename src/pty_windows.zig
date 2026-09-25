@@ -161,6 +161,7 @@ extern "kernel32" fn TerminateProcess(hProcess: HANDLE, uExitCode: DWORD) callco
 extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
 extern "kernel32" fn SetHandleInformation(hObject: HANDLE, dwMask: DWORD, dwFlags: DWORD) callconv(.winapi) BOOL;
 extern "kernel32" fn Sleep(dwMilliseconds: DWORD) callconv(.winapi) void;
+extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
 extern "kernel32" fn GetEnvironmentVariableW(
     lpName: [*:0]const u16,
     lpBuffer: ?[*]u16,
@@ -335,18 +336,28 @@ pub const Pty = struct {
     /// Waits for the child to say something, or for the timeout.
     ///
     /// ConPTY's pipes cannot be waited on the way a descriptor can, so this
-    /// polls; the interval is short enough that a shell's echo still lands in
-    /// the frame the key was pressed in.
+    /// polls until the child speaks or the budget runs out.
+    ///
+    /// Against the clock, not by counting sleeps. `Sleep(1)` does not return in
+    /// a millisecond: Windows rounds it up to the timer resolution, about
+    /// fifteen, so taking one off the budget per sleep overspent it more than
+    /// twenty times over. Asking for six milliseconds after a keystroke -- which
+    /// is what the render loop does, so the shell's echo lands in the same frame
+    /// as the key -- waited a tenth of a second instead, on the thread that
+    /// draws. A test asking for two milliseconds two thousand times took a
+    /// minute and a half, which is how this came to light.
+    ///
+    /// One sleep quantum of overshoot is left, and cannot be helped without
+    /// asking the whole system for a finer timer.
     pub fn waitReadable(self: *Pty, timeout_ms: i32) bool {
-        var waited: i32 = 0;
-        while (waited <= timeout_ms) {
+        const deadline = GetTickCount64() + @as(u64, @intCast(@max(timeout_ms, 0)));
+        while (true) {
             var available: DWORD = 0;
             if (!PeekNamedPipe(self.out_read, null, 0, null, &available, null).toBool()) return false;
             if (available > 0) return true;
+            if (GetTickCount64() >= deadline) return false;
             Sleep(1);
-            waited += 1;
         }
-        return false;
     }
 
     pub fn resize(self: *Pty, cols: u16, rows: u16) void {
