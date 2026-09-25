@@ -42,6 +42,18 @@ fn sleepMs(ms: u32) void {
     nap.ms(ms);
 }
 
+/// How long one turn of a polling loop waits, and how many turns it gets.
+///
+/// Ten milliseconds at a time rather than one: neither a sleep nor
+/// `waitReadable` can return faster than the platform's timer resolution, about
+/// fifteen milliseconds on Windows, so a loop asking for one millisecond two
+/// thousand times spends a minute and a half there against two seconds on a
+/// system that honours it. Asking for ten keeps the two within half again of
+/// each other.
+const POLL_MS: u32 = 10;
+/// Turns, giving every wait below the same couple of seconds.
+const POLL_TURNS: usize = 200;
+
 /// A command that prints and exits, spelled for the platform.
 fn echoArgv() []const [*:0]const u8 {
     return if (posix_only)
@@ -73,10 +85,10 @@ test "spawn runs a command and streams its output" {
 
     var seen: [256]u8 = undefined;
     var len: usize = 0;
-    for (0..2000) |_| {
+    for (0..POLL_TURNS) |_| {
         const n = pty.read(seen[len..]) catch break;
         if (n == 0) {
-            if (!pty.waitReadable(2)) _ = pty.poll();
+            if (!pty.waitReadable(POLL_MS)) _ = pty.poll();
             continue;
         }
         len += n;
@@ -93,10 +105,10 @@ test "write reaches the child and comes back through the echo" {
     try pty.write("hello\n");
     var buf: [256]u8 = undefined;
     var len: usize = 0;
-    for (0..2000) |_| {
+    for (0..POLL_TURNS) |_| {
         const n = pty.read(buf[len..]) catch break;
         if (n == 0) {
-            _ = pty.waitReadable(2);
+            _ = pty.waitReadable(POLL_MS);
             continue;
         }
         len += n;
@@ -114,12 +126,12 @@ test "poll reports a finished child" {
     defer pty.close();
 
     var exited = false;
-    for (0..2000) |_| {
+    for (0..POLL_TURNS) |_| {
         if (pty.poll()) {
             exited = true;
             break;
         }
-        _ = pty.waitReadable(1);
+        _ = pty.waitReadable(POLL_MS);
     }
     try testing.expect(exited);
 }
@@ -172,19 +184,19 @@ test "a live child is never reported as exited" {
     var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);
     defer pty.close();
 
-    for (0..500) |_| {
+    for (0..POLL_TURNS) |_| {
         try testing.expect(!pty.poll());
         try testing.expect(!pty.exited);
-        _ = pty.waitReadable(1);
+        _ = pty.waitReadable(POLL_MS);
     }
     // Still talking, which is the real proof it was alive all along.
     try pty.write("alive\n");
     var buf: [256]u8 = undefined;
     var len: usize = 0;
-    for (0..2000) |_| {
+    for (0..POLL_TURNS) |_| {
         const n = pty.read(buf[len..]) catch break;
         if (n == 0) {
-            _ = pty.waitReadable(2);
+            _ = pty.waitReadable(POLL_MS);
             continue;
         }
         len += n;
@@ -204,12 +216,12 @@ test "spawnShell starts the user's shell and it responds" {
     // Drain until the shell stops talking, however the platform words that.
     var buf: [4096]u8 = undefined;
     var total: usize = 0;
-    for (0..4000) |_| {
+    for (0..POLL_TURNS) |_| {
         const n = pty.read(&buf) catch break;
         total += n;
         if (n == 0) {
             if (pty.poll()) break;
-            _ = pty.waitReadable(1);
+            _ = pty.waitReadable(POLL_MS);
         }
     }
     try testing.expect(total > 0);
@@ -224,15 +236,14 @@ test "spawnShell starts the user's shell and it responds" {
     // stopped waiting once the master was hung up, and the loop spent its four
     // thousand turns in microseconds before the shell was reapable at all.
     var exited = false;
-    // Five seconds of ceiling, reached in a millisecond or two in practice. A
-    // loaded CI runner is the one place this has to be generous, and waiting
-    // costs nothing when the answer arrives at once.
-    for (0..5000) |_| {
+    // A couple of seconds of ceiling, reached in a millisecond or two in
+    // practice. Waiting costs nothing when the answer arrives at once.
+    for (0..POLL_TURNS) |_| {
         if (pty.poll()) {
             exited = true;
             break;
         }
-        sleepMs(1);
+        sleepMs(POLL_MS);
     }
     try testing.expect(exited);
 }
