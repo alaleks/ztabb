@@ -499,7 +499,9 @@ fn sleepMs(ms: u32) void {
 /// configuration or its startup time.
 fn echoCommand() []const [*:0]const u8 {
     return if (@import("builtin").os.tag == .windows)
-        &[_][*:0]const u8{"cmd.exe /c more"}
+        // See `catArgv` in pty.zig: `more` pages rather than echoes, so
+        // nothing written ever came back.
+        &[_][*:0]const u8{"cmd.exe /c findstr ."}
     else
         &[_][*:0]const u8{ "/bin/cat", "-u" };
 }

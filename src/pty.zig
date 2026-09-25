@@ -67,7 +67,13 @@ fn catArgv() []const [*:0]const u8 {
     return if (posix_only)
         &[_][*:0]const u8{ "/bin/cat", "-u" }
     else
-        &[_][*:0]const u8{"cmd.exe /c more"};
+        // `more` is a pager: it reads its input and pages it, and under a
+        // pseudo-console it does not hand back what was written to it, so every
+        // test that writes and waits for the text failed. `findstr .` matches
+        // any line with a character in it and writes it out verbatim -- no line
+        // numbers, so the text still starts at the first cell of the first row,
+        // which is what some of these check.
+        &[_][*:0]const u8{"cmd.exe /c findstr ."};
 }
 
 test "the default shell is named" {
@@ -140,7 +146,23 @@ test "waitReadable reports data and times out when there is none" {
     var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);
     defer pty.close();
 
-    // Nothing sent yet: the wait must come back empty-handed rather than hang.
+    // A console host paints its screen the moment it starts, so on Windows
+    // there is something to read before anything has been typed. Drain that
+    // first: what this asserts is that a *quiet* pty times out, and "quiet"
+    // has to mean the same thing on both platforms.
+    var scratch: [4096]u8 = undefined;
+    var quiet: usize = 0;
+    for (0..POLL_TURNS) |_| {
+        const n = pty.read(&scratch) catch break;
+        if (n > 0) {
+            quiet = 0;
+            continue;
+        }
+        quiet += 1;
+        if (quiet >= 3) break;
+        _ = pty.waitReadable(POLL_MS);
+    }
+
     try testing.expect(!pty.waitReadable(20));
 
     try pty.write("ping\n");
