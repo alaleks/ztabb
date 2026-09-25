@@ -43,7 +43,6 @@ const GRACE_MS: DWORD = 200;
 /// front end really wants.
 const OUT_PIPE_BYTES: DWORD = 1 << 20;
 const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x00080000;
-const CREATE_UNICODE_ENVIRONMENT: DWORD = 0x00000400;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
 const HANDLE_FLAG_INHERIT: DWORD = 0x00000001;
 
@@ -287,7 +286,12 @@ pub const Pty = struct {
             null,
             null,
             .FALSE, // handles reach the child through the attribute, not inheritance
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            // Only the flag the pseudo-console needs. This also asked for
+            // CREATE_UNICODE_ENVIRONMENT, which describes the encoding of an
+            // environment block -- and none is passed here, so it described
+            // nothing. Microsoft's sample passes this one flag alone, and that
+            // was the last place this call differed from it.
+            EXTENDED_STARTUPINFO_PRESENT,
             null,
             null,
             &si,
