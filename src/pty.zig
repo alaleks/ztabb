@@ -42,6 +42,21 @@ fn sleepMs(ms: u32) void {
     nap.ms(ms);
 }
 
+/// Says what the pty actually produced when the text looked for is not in it.
+///
+/// A failed `indexOf` says nothing about whether nothing arrived, or a screen
+/// repaint arrived and the payload did not -- and those want opposite fixes. A
+/// pseudo-console makes the difference matter: it renders rather than passes
+/// bytes through, and announces itself with a full repaint before the child has
+/// said anything at all.
+fn reportIfMissing(wanted: []const u8, got: []const u8) void {
+    if (std.mem.indexOf(u8, got, wanted) != null) return;
+    std.debug.print(
+        "\n  looked for '{s}' and did not find it in the {d} bytes the pty gave:\n  {f}\n",
+        .{ wanted, got.len, std.zig.fmtString(got) },
+    );
+}
+
 /// How long one turn of a polling loop waits, and how many turns it gets.
 ///
 /// Ten milliseconds at a time rather than one: neither a sleep nor
@@ -89,7 +104,7 @@ test "spawn runs a command and streams its output" {
     var pty = try Pty.spawn(echoArgv(), &.{}, 80, 24);
     defer pty.close();
 
-    var seen: [256]u8 = undefined;
+    var seen: [64 * 1024]u8 = undefined;
     var len: usize = 0;
     for (0..POLL_TURNS) |_| {
         const n = pty.read(seen[len..]) catch break;
@@ -101,6 +116,7 @@ test "spawn runs a command and streams its output" {
         if (len == seen.len) break;
         if (std.mem.indexOf(u8, seen[0..len], "ztabb") != null) break;
     }
+    reportIfMissing("ztabb", seen[0..len]);
     try testing.expect(std.mem.indexOf(u8, seen[0..len], "ztabb") != null);
 }
 
@@ -109,7 +125,7 @@ test "write reaches the child and comes back through the echo" {
     defer pty.close();
 
     try pty.write("hello\n");
-    var buf: [256]u8 = undefined;
+    var buf: [64 * 1024]u8 = undefined;
     var len: usize = 0;
     for (0..POLL_TURNS) |_| {
         const n = pty.read(buf[len..]) catch break;
@@ -120,6 +136,7 @@ test "write reaches the child and comes back through the echo" {
         len += n;
         if (std.mem.indexOf(u8, buf[0..len], "hello") != null) break;
     }
+    reportIfMissing("hello", buf[0..len]);
     try testing.expect(std.mem.indexOf(u8, buf[0..len], "hello") != null);
 }
 
@@ -166,7 +183,15 @@ test "waitReadable reports data and times out when there is none" {
     try testing.expect(!pty.waitReadable(20));
 
     try pty.write("ping\n");
-    try testing.expect(pty.waitReadable(2000));
+    const answered = pty.waitReadable(2000);
+    if (!answered) {
+        std.debug.print(
+            "\n  wrote to the child and nothing came back in two seconds:" ++
+                " either it is not attached to this pty, or it does not echo\n",
+            .{},
+        );
+    }
+    try testing.expect(answered);
 
     var buf: [64]u8 = undefined;
     const n = try pty.read(&buf);
@@ -213,7 +238,7 @@ test "a live child is never reported as exited" {
     }
     // Still talking, which is the real proof it was alive all along.
     try pty.write("alive\n");
-    var buf: [256]u8 = undefined;
+    var buf: [64 * 1024]u8 = undefined;
     var len: usize = 0;
     for (0..POLL_TURNS) |_| {
         const n = pty.read(buf[len..]) catch break;
@@ -224,6 +249,7 @@ test "a live child is never reported as exited" {
         len += n;
         if (std.mem.indexOf(u8, buf[0..len], "alive") != null) break;
     }
+    reportIfMissing("alive", buf[0..len]);
     try testing.expect(std.mem.indexOf(u8, buf[0..len], "alive") != null);
 }
 
