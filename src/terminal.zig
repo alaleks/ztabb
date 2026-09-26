@@ -1122,7 +1122,26 @@ pub const Terminal = struct {
         }
         if (self.csi_private != 0) return;
 
-        self.wrap_pending = false;
+        // The deferred wrap belongs to the cursor. A character written in the
+        // last column leaves the cursor there with a wrap owed, and the next
+        // character pays it by starting the row below. Only sequences that
+        // move the cursor, or rewrite the line it is sitting on, cancel that
+        // debt -- setting a colour does not.
+        //
+        // Clearing it for every sequence meant an attribute change mid-line
+        // silently cancelled the wrap, so the character that should have begun
+        // the next row was written over the last column instead: one character
+        // lost and every column after it out by one. A shell that colours its
+        // suggestion a character at a time, which is the common case, walked
+        // the whole line out of step that way -- and then redrew it from a
+        // position the terminal did not agree with, leaving the wreckage the
+        // screenshot showed.
+        switch (final) {
+            // Neither moves the cursor, so neither touches the wrap.
+            'm', 's' => {},
+            else => self.wrap_pending = false,
+        }
+
         switch (final) {
             'A' => self.cursor_row -|= self.param(0, 1),
             'B' => self.cursor_row = @min(self.rows - 1, self.cursor_row +| self.param(0, 1)),
@@ -2182,6 +2201,40 @@ test "an absurd scroll parameter blanks the screen rather than hanging" {
             try testing.expectEqual(@as(u21, ' '), t.cellAt(@intCast(r), @intCast(c)).ch);
         }
     }
+}
+
+test "a colour change does not cancel a pending wrap" {
+    // Writing in the last column leaves the cursor there with the wrap owed;
+    // the next character starts the row below. An attribute change in between
+    // must not cancel that -- it used to, and the character that should have
+    // begun the next row went over the last column instead, losing it and
+    // putting every column after it out by one. Shells colour a suggestion a
+    // character at a time, so a long line walked steadily out of step.
+    var t = try testTerm(4, 3);
+    defer t.deinit();
+
+    t.write("abcd");
+    try testing.expect(t.wrap_pending);
+    t.write("\x1b[31m");
+    try testing.expect(t.wrap_pending);
+    t.write("e");
+
+    try testing.expectEqual(@as(u32, 1), t.cursor_row);
+    try testing.expectEqual(@as(u32, 1), t.cursor_col);
+    try testing.expectEqual(@as(u21, 'd'), t.cellAt(0, 3).ch);
+    try testing.expectEqual(@as(u21, 'e'), t.cellAt(1, 0).ch);
+}
+
+test "moving the cursor does cancel a pending wrap" {
+    var t = try testTerm(4, 3);
+    defer t.deinit();
+    t.write("abcd");
+    try testing.expect(t.wrap_pending);
+    t.write("\x1b[D"); // one to the left
+    try testing.expect(!t.wrap_pending);
+    t.write("X");
+    try testing.expectEqual(@as(u32, 0), t.cursor_row);
+    try testing.expectEqual(@as(u21, 'X'), t.cellAt(0, 2).ch);
 }
 
 test "mouse reporting modes are tracked" {
