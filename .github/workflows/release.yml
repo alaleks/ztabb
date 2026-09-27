@@ -1,6 +1,6 @@
 # Fires on a v* tag. ztabb links SDL3, so every artifact is built on the
 # platform it runs on: macOS ships signed .app bundles, Linux a binary that
-# links the system SDL3.
+# links the system SDL3, and Windows an exe with SDL3.dll beside it.
 name: Release
 
 on:
@@ -29,6 +29,8 @@ jobs:
             os: macos-15-intel
           - arch: x86_64-linux
             os: ubuntu-latest
+          - arch: x86_64-windows
+            os: windows-latest
 
     steps:
       - uses: actions/checkout@v7
@@ -48,7 +50,19 @@ jobs:
         if: runner.os == 'Linux'
         run: ./tools/install-sdl3-linux.sh
 
+      # Windows has no package manager to reach for; SDL3 comes from vcpkg,
+      # already on the runner image, and SDL3_ROOT tells build.zig where.
+      - name: Install SDL3 (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vcpkg install sdl3:x64-windows
+          echo "SDL3_ROOT=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+
+      # CI runs the Windows tests on every push; the release job only needs
+      # to build and ship the binary, so skip the tests there.
       - name: Test
+        if: runner.os != 'Windows'
         run: zig build test -Doptimize=ReleaseFast
 
       - name: Build app bundle
@@ -56,10 +70,11 @@ jobs:
         run: zig build bundle -Doptimize=ReleaseFast
 
       - name: Build binary
-        if: runner.os == 'Linux'
+        if: runner.os != 'macOS'
         run: zig build -Doptimize=ReleaseFast
 
       - name: Package
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
@@ -75,6 +90,20 @@ jobs:
             install -D licenses/JetBrainsMono-OFL.txt "pack/licenses/JetBrainsMono-OFL.txt"
             tar czf "dist/ztabb-${{ matrix.arch }}.tar.gz" -C pack .
           fi
+
+      # ztabb.exe links SDL3 dynamically, so the DLL ships beside it rather
+      # than asking the user to install SDL3 themselves.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pack/licenses | Out-Null
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item zig-out/bin/ztabb.exe pack/
+          Copy-Item "$env:SDL3_ROOT/bin/SDL3.dll" pack/
+          Copy-Item LICENSE, NOTICE pack/
+          Copy-Item licenses/JetBrainsMono-OFL.txt pack/licenses/
+          Compress-Archive -Path pack/* -DestinationPath "dist/ztabb-${{ matrix.arch }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -105,6 +134,9 @@ jobs:
           body: |
             Linux needs SDL3 installed (`libsdl3-0` or equivalent); the
             tarball carries the binary and the licences.
+
+            The Windows zip carries `ztabb.exe`, `SDL3.dll` and the licences;
+            no separate SDL3 install is needed.
 
             The macOS bundles are ad-hoc signed, not signed with a Developer ID.
             macOS will quarantine a downloaded copy, so on first launch either
