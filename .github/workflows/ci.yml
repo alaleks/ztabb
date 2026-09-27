@@ -207,6 +207,13 @@ jobs:
           done
           exit 1
 
+      # `zig build test` compiles and links the test suites, and `main.zig` is
+      # in none of them, so the Windows binary itself is never proven to build.
+      # This is that proof -- the same check the Linux job makes -- linking SDL3
+      # through the SDL3_ROOT the install step above exported.
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast
+
   cross:
     name: Cross-compile ${{ matrix.target }}
     runs-on: ubuntu-latest
