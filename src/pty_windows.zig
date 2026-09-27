@@ -43,6 +43,7 @@ const GRACE_MS: DWORD = 200;
 /// front end really wants.
 const OUT_PIPE_BYTES: DWORD = 1 << 20;
 const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x00080000;
+const STARTF_USESTDHANDLES: DWORD = 0x00000100;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
 const HANDLE_FLAG_INHERIT: DWORD = 0x00000001;
 
@@ -273,6 +274,12 @@ pub const Pty = struct {
         var si = std.mem.zeroes(STARTUPINFOEXW);
         si.StartupInfo.cb = @sizeOf(STARTUPINFOEXW);
         si.lpAttributeList = attrs;
+        // Without this, a console child of a console process whose own std
+        // handles are redirected silently inherits those redirected handles
+        // instead of the pseudo-console: its output goes to our stdout and the
+        // window stays blank. Naming the handles -- and leaving them null --
+        // stops that fallback, and the PTY connection remakes the real ones.
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
 
         var cmdline: [1024]u16 = undefined;
         const n = std.unicode.utf8ToUtf16Le(&cmdline, std.mem.span(argv[0])) catch
