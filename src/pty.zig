@@ -149,12 +149,15 @@ test "poll reports a finished child" {
     defer pty.close();
 
     var exited = false;
+    // Pace with a sleep, not `waitReadable`: a pseudo-console always has its
+    // handshake pending in the pipe, so `waitReadable` returns at once and the
+    // loop can finish before the child has had time to start, let alone exit.
     for (0..POLL_TURNS) |_| {
         if (pty.poll()) {
             exited = true;
             break;
         }
-        _ = pty.waitReadable(POLL_MS);
+        sleepMs(POLL_MS);
     }
     try testing.expect(exited);
 }
