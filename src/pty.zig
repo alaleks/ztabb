@@ -91,6 +91,15 @@ fn catArgv() []const [*:0]const u8 {
         &[_][*:0]const u8{"cmd.exe /c findstr ."};
 }
 
+/// A command that stays alive briefly without reading its input, so a test can
+/// fill the pty's input buffer and watch the write side drop rather than block.
+fn sleepArgv() []const [*:0]const u8 {
+    return if (posix_only)
+        &[_][*:0]const u8{ "/bin/sh", "-c", "sleep 3" }
+    else
+        &[_][*:0]const u8{"cmd.exe /c ping -n 4 127.0.0.1 >nul"};
+}
+
 test "the default shell is named" {
     const shell = std.mem.span(defaultShell());
     try testing.expect(shell.len > 0);
@@ -254,6 +263,25 @@ test "a live child is never reported as exited" {
     }
     reportIfMissing("alive", buf[0..len]);
     try testing.expect(std.mem.indexOf(u8, buf[0..len], "alive") != null);
+}
+
+test "write does not block a child that has stopped reading" {
+    var pty = try Pty.spawn(sleepArgv(), &.{}, 80, 24);
+    defer pty.close();
+
+    // Far more than any input buffer holds. A child that never reads fills the
+    // pipe, and a blocking write would wedge this test for ever; the pty must
+    // drop the overflow and return instead.
+    var junk = [_]u8{'x'} ** (256 * 1024);
+    try pty.write(&junk);
+}
+
+test "closing a pty twice is harmless" {
+    var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);
+    pty.close();
+    // The second close must be a no-op, not a double free of the pty's
+    // internals.
+    pty.close();
 }
 
 test "spawnShell starts the user's shell and it responds" {
