@@ -139,7 +139,10 @@ jobs:
       # cancels, and a cancelled job skips the steps that run `if: failure()`.
       # A step that times out merely fails, which is what the next one waits for.
       - name: Unit tests
-        timeout-minutes: 12
+        # The last healthy run of this step took 157s, compilation included.
+        # Six minutes leaves plenty of room for a slow runner while keeping the
+        # cost of a hang -- and so of one debugging cycle -- down.
+        timeout-minutes: 6
         run: zig build test -j1
 
       # Runs only when the step above failed.
@@ -166,7 +169,7 @@ jobs:
       # are left out, since they need its DLL beside them to start at all.
       - name: Run each suite standalone
         if: failure()
-        timeout-minutes: 15
+        timeout-minutes: 10
         shell: bash
         run: |
           set -u
