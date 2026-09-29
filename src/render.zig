@@ -639,11 +639,15 @@ pub const Renderer = struct {
     /// comes out as a white square -- which is what a Braille or block spinner
     /// would look like here. Drawn from rectangles it owes the font nothing.
     fn drawSpinner(self: *Renderer, x: f32, top: f32, box_h: f32, lit: u32, dim: u32, step: usize) void {
-        const size = @round(self.iconDrawSize() * 0.75);
-        const dot = @max(1.0, @round(size / 5));
+        // As tall as the capitals beside it, and centred on their middle, so
+        // it sits on the line of the text rather than on the line of the tab.
+        const size = self.spinnerSize();
+        const dot = @max(1.0, @round(size / 4));
         const radius = (size - dot) / 2;
         const cx = x + size / 2;
-        const cy = top + box_h / 2;
+        const ink_h: f32 = @floatFromInt(self.ui_ink.height());
+        const ink_top: f32 = @floatFromInt(self.ui_ink.top);
+        const cy = @round(self.uiTextY(top, box_h) + ink_top + ink_h / 2);
 
         for (0..SPINNER_DOTS) |i| {
             const turn = @as(f32, @floatFromInt(i)) /
@@ -658,9 +662,20 @@ pub const Renderer = struct {
         }
     }
 
-    /// The room a spinner asks for, in pixels, gap included.
+    /// The mark's own size: the height of the capitals it stands beside.
+    fn spinnerSize(self: *const Renderer) f32 {
+        return @round(@as(f32, @floatFromInt(self.ui_ink.height())));
+    }
+
+    /// The gap between the name and the mark. A quarter of a cell read as a
+    /// collision; three quarters reads as a space.
+    fn spinnerGap(self: *const Renderer) f32 {
+        return @round(self.uiCellW() * 0.75);
+    }
+
+    /// The room a mark asks for, in pixels, gap included.
     fn spinnerWidth(self: *const Renderer) f32 {
-        return @round(self.iconDrawSize() * 0.75) + self.uiCellW() / 2;
+        return self.spinnerSize() + self.spinnerGap();
     }
 
     pub fn drawTabBar(
@@ -725,7 +740,7 @@ pub const Renderer = struct {
             // the right of its name, so the label has to give up the room.
             const spin_room = if (tab.connecting) self.spinnerWidth() else 0;
             const budget: u32 = @intFromFloat(@max(0, (room - spin_room) / self.uiCellW()));
-            self.drawTabLabel(
+            const label_end = self.drawTabLabel(
                 tab.labelParts(),
                 label_x,
                 self.uiTextY(top, bar_h),
@@ -735,13 +750,17 @@ pub const Renderer = struct {
             );
 
             if (tab.connecting) {
-                const shown = @min(tab.labelParts().len(), budget);
+                // The ring the mark turns on is the text's own colour, taken
+                // most of the way there from the tab it sits on so it reads as
+                // a track rather than as more writing; the one lit dot is the
+                // accent, which is what makes the turn visible.
+                const seat = if (is_active) th.tab_active_bg else th.tab_inactive_bg;
                 self.drawSpinner(
-                    label_x + @as(f32, @floatFromInt(shown)) * self.uiCellW() + self.uiCellW() / 4,
+                    label_end + self.spinnerGap(),
                     top,
                     bar_h,
-                    if (is_active) th.ansi[4] else th.tab_inactive_fg,
-                    th.tab_border,
+                    th.ansi[4],
+                    theme.mix(seat, th.fg, 0.7),
                     step,
                 );
             }
@@ -825,6 +844,12 @@ pub const Renderer = struct {
     /// When the parts do not fit, the trailing context goes first and the
     /// leading path is elided from the left, because the last component is
     /// what tells two tabs apart.
+    /// Draws the label and returns the x just past it.
+    ///
+    /// Returned rather than recomputed: what was actually drawn depends on the
+    /// budget and on where the text was elided, and a label is counted in
+    /// characters while `Label.len` counts bytes -- so anything but ASCII put
+    /// a mark measured from it in the wrong place.
     fn drawTabLabel(
         self: *Renderer,
         parts: tabs_mod.Tab.Label,
@@ -833,7 +858,7 @@ pub const Renderer = struct {
         budget: u32,
         bright: u32,
         dim: u32,
-    ) void {
+    ) f32 {
         const fitted = fitParts(parts, budget);
         var at = x;
         var buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
@@ -850,8 +875,9 @@ pub const Renderer = struct {
         at += self.drawUiText(fitted.name, at, y, bright);
         if (fitted.suffix.len > 0) {
             at += self.uiCellW();
-            _ = self.drawUiText(fitted.suffix, at, y, dim);
+            at += self.drawUiText(fitted.suffix, at, y, dim);
         }
+        return at;
     }
 
     /// Draws the title into the strip the system title bar left transparent:
