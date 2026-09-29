@@ -511,7 +511,11 @@ pub const Renderer = struct {
             // Background first, merging horizontal runs of one colour so a
             // full-width bar costs one draw call instead of `cols` of them.
             var run_start: u32 = 0;
-            var run_color: u32 = if (sel != null and sel.?.contains(row, 0))
+            // A selection counts rows over the whole buffer, not the viewport,
+            // so that scrolling moves the view across it rather than dragging
+            // it along.
+            const abs_row = t.absRow(row);
+            var run_color: u32 = if (sel != null and sel.?.contains(abs_row, 0))
                 th.selection
             else
                 term.Terminal.resolve(cells[0], th).bg;
@@ -519,7 +523,7 @@ pub const Renderer = struct {
                 const c: u32 = @intCast(ci);
                 const color = if (c < t.cols) blk: {
                     if (sel) |sl| {
-                        if (sl.contains(row, c)) break :blk th.selection;
+                        if (sl.contains(abs_row, c)) break :blk th.selection;
                     }
                     break :blk term.Terminal.resolve(cells[c], th).bg;
                 } else ~run_color;

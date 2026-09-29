@@ -325,8 +325,24 @@ pub const Terminal = struct {
             @as(u8, @bitCast(cell.attrs)) == @as(u8, @bitCast(Attrs{}));
     }
 
-    /// Source row `i` for reflow: history first, oldest at 0, then the screen.
-    fn srcRow(self: *const Terminal, i: u32) []const Cell {
+    /// How many rows there are altogether: the history and then the screen.
+    /// The space `srcRow` and a selection are counted in.
+    pub fn absRows(self: *const Terminal) u32 {
+        return self.sb_len + self.rows;
+    }
+
+    /// The absolute row a row of the viewport is showing.
+    ///
+    /// A selection is held in these rather than in viewport rows, so that
+    /// scrolling moves the view over the selection rather than the selection
+    /// over the text. Held the other way, dragging past the edge of the screen
+    /// selected whatever happened to slide under the pointer.
+    pub fn absRow(self: *const Terminal, view_row: u32) u32 {
+        return self.sb_len - @min(self.view_offset, self.sb_len) + view_row;
+    }
+
+    /// Source row `i`: history first, oldest at 0, then the screen.
+    pub fn srcRow(self: *const Terminal, i: u32) []const Cell {
         if (i < self.sb_len) return self.scrollbackRow(self.sb_len - i).?;
         return self.cells[self.idx(i - self.sb_len, 0)..][0..self.cols];
     }
@@ -1417,7 +1433,7 @@ pub const MouseMode = struct {
     }
 };
 
-/// A range of the visible grid, as the mouse drew it.
+/// A range of the buffer, as the mouse drew it.
 ///
 /// Anchored where the drag began and headed where it is now, so dragging
 /// backwards selects the same span as dragging forwards.
@@ -1438,9 +1454,9 @@ pub const Selection = struct {
         return if (a_first) .{ .start = a, .end = b } else .{ .start = b, .end = a };
     }
 
-    /// Whether a cell of the viewport falls inside the selection. The end
-    /// column is exclusive, so a drag that has not left its cell selects
-    /// nothing.
+    /// Whether a cell falls inside the selection. `row` is absolute, as the
+    /// selection's own rows are -- `Terminal.absRow` converts. The end column
+    /// is exclusive, so a drag that has not left its cell selects nothing.
     pub fn contains(self: Selection, row: u32, col: u32) bool {
         if (!self.active) return false;
         const r = self.ordered();
@@ -1467,8 +1483,8 @@ pub fn selectedText(t: *const Terminal, sel: Selection, buf: []u8) []const u8 {
     var n: usize = 0;
 
     var row = r.start.row;
-    while (row <= r.end.row and row < t.rows) : (row += 1) {
-        const cells = t.viewRow(row);
+    while (row <= r.end.row and row < t.absRows()) : (row += 1) {
+        const cells = t.srcRow(row);
         const from = if (row == r.start.row) r.start.col else 0;
         const to = if (row == r.end.row) @min(r.end.col, t.cols) else t.cols;
 
@@ -2267,6 +2283,67 @@ test "leaving the alternate screen gives the mouse back" {
     try testing.expect(!t.onAltScreen());
     try testing.expect(!t.mouse.wants());
     try testing.expect(!t.mouse.sgr);
+}
+
+test "a row of the viewport names its place in the whole buffer" {
+    var t = try testTerm(10, 3);
+    defer t.deinit();
+    t.write("aaa\r\nbbb\r\nccc\r\nddd\r\neee");
+    // Two lines have gone to history; the screen holds the last three.
+    try testing.expectEqual(@as(u32, 2), t.sb_len);
+
+    // At the bottom, the top of the screen is the first row after the history.
+    try testing.expectEqual(@as(u32, 2), t.absRow(0));
+    try testing.expectEqual(@as(u32, 4), t.absRow(2));
+
+    // Scrolled all the way back, it is the oldest row there is.
+    t.scrollView(2);
+    try testing.expectEqual(@as(u32, 0), t.absRow(0));
+    try testing.expectEqual(@as(u32, 5), t.absRows());
+}
+
+test "a selection keeps its text when the view scrolls" {
+    // Held in viewport rows, a selection is dragged along by a scroll and ends
+    // up over whatever slid underneath it -- which is why selecting across a
+    // scroll could not be done at all. Held against the buffer, the view moves
+    // over it instead.
+    var t = try testTerm(10, 3);
+    defer t.deinit();
+    t.write("aaa\r\nbbb\r\nccc\r\nddd\r\neee");
+
+    // The second row of the history, which is "bbb".
+    const sel = Selection{
+        .anchor_row = 1,
+        .anchor_col = 0,
+        .head_row = 1,
+        .head_col = 3,
+        .active = true,
+    };
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("bbb", selectedText(&t, sel, &buf));
+
+    t.scrollView(2);
+    try testing.expectEqualStrings("bbb", selectedText(&t, sel, &buf));
+
+    t.scrollView(-2);
+    try testing.expectEqualStrings("bbb", selectedText(&t, sel, &buf));
+}
+
+test "a selection can span the history and the screen" {
+    var t = try testTerm(10, 3);
+    defer t.deinit();
+    t.write("aaa\r\nbbb\r\nccc\r\nddd\r\neee");
+
+    // From the oldest row in history to the last on screen.
+    const sel = Selection{
+        .anchor_row = 0,
+        .anchor_col = 0,
+        .head_row = 4,
+        .head_col = 3,
+        .active = true,
+    };
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("aaa\nbbb\nccc\nddd\neee", selectedText(&t, sel, &buf));
 }
 
 test "mouse reporting modes are tracked" {

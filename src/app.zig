@@ -88,6 +88,9 @@ pub const App = struct {
     /// The range the mouse is drawing, or has drawn, over the terminal.
     selection: ?term.Selection = null,
     dragging: bool = false,
+    /// Where the pointer was last seen, so a drag held beyond the edge of the
+    /// grid keeps scrolling while it is not moving.
+    drag_y: f32 = 0,
     menu: ?MenuState = null,
     picker: ?Picker = null,
     picker_rows: [ssh.MAX_HOSTS]rnd.HostRow = undefined,
@@ -329,6 +332,7 @@ pub const App = struct {
             // chance to arrive before this frame is drawn.
             if (had_input) self.tabs.awaitEcho(ECHO_WAIT_MS);
             const had_output = self.tabs.pumpAll();
+            const scrolled = self.autoScroll();
             if (self.tabs.reapExited() > 0) {
                 self.ui_dirty = true;
                 if (self.tabs.count == 0) self.running = false;
@@ -337,7 +341,7 @@ pub const App = struct {
             self.render();
 
             const now = sdl.ticks();
-            if (had_input or had_output) {
+            if (had_input or had_output or scrolled) {
                 self.pacer.activity(now);
                 continue;
             }
@@ -582,14 +586,19 @@ pub const App = struct {
             if (tab.tree.paneAt(self.tabs.area, cell.col, cell.row)) |id| {
                 tab.focused = id;
             }
-            const at = self.renderer.cellAt(&tab.active().terminal, self.chromeH(), x, y);
+            const t = &tab.active().terminal;
+            const at = self.renderer.cellAt(t, self.chromeH(), x, y);
+            // Held against the buffer rather than the viewport, so scrolling
+            // moves the view across the selection instead of dragging it along.
+            const abs = t.absRow(at.row);
             self.selection = .{
-                .anchor_row = at.row,
+                .anchor_row = abs,
                 .anchor_col = at.col,
-                .head_row = at.row,
+                .head_row = abs,
                 .head_col = at.col,
             };
             self.dragging = true;
+            self.drag_y = y;
             self.ui_dirty = true;
             return;
         }
@@ -691,13 +700,49 @@ pub const App = struct {
         if (!self.dragging) return;
         const tab = self.tabs.active() orelse return;
         const scale: f32 = self.density;
-        const at = self.renderer.cellAt(&tab.active().terminal, self.chromeH(), ev.x * scale, ev.y * scale);
+        self.drag_y = ev.y * scale;
+        const t = &tab.active().terminal;
+        const at = self.renderer.cellAt(t, self.chromeH(), ev.x * scale, self.drag_y);
         if (self.selection) |*sel| {
-            sel.head_row = at.row;
+            sel.head_row = t.absRow(at.row);
             sel.head_col = at.col;
             sel.active = true;
             self.ui_dirty = true;
         }
+    }
+
+    /// Keeps scrolling while a drag is held past the top or bottom of the grid.
+    ///
+    /// Motion events only arrive while the pointer moves, so holding it still
+    /// beyond the edge has to go on working: this is asked every frame rather
+    /// than waiting to be told. Returns whether anything moved, which is also
+    /// what keeps the loop awake while it does.
+    fn autoScroll(self: *App) bool {
+        if (!self.dragging) return false;
+        const tab = self.tabs.active() orelse return false;
+        const t = &tab.active().terminal;
+
+        const lines: i32 = if (self.drag_y < self.chromeH())
+            1
+        else if (self.drag_y > @as(f32, @floatFromInt(self.win_h)))
+            -1
+        else
+            return false;
+
+        const before = t.view_offset;
+        t.scrollView(lines);
+        if (t.view_offset == before) return false;
+
+        // The far end follows the edge it is being dragged past, so the
+        // selection grows by the line that just came into view.
+        if (self.selection) |*sel| {
+            const edge: u32 = if (lines > 0) 0 else t.rows - 1;
+            sel.head_row = t.absRow(edge);
+            sel.head_col = if (lines > 0) 0 else t.cols;
+            sel.active = true;
+        }
+        self.ui_dirty = true;
+        return true;
     }
 
     /// Where the terminal area begins, below the title strip and the tabs.
