@@ -655,12 +655,19 @@ pub const Terminal = struct {
         if (to_history and self.scroll_top == 0 and self.scroll_bot == self.rows - 1) {
             self.pushScrollback(0);
         }
-        var r = self.scroll_top;
-        while (r < self.scroll_bot) : (r += 1) {
-            const dst = self.idx(r, 0);
-            const src = self.idx(r + 1, 0);
-            @memcpy(self.cells[dst..][0..self.cols], self.cells[src..][0..self.cols]);
-            self.wrapped[r] = self.wrapped[r + 1];
+        // One move for the whole region rather than one per row. Rows sit
+        // next to each other in `cells`, so the region is a single run, and a
+        // scroll is the dearest thing a line of output can ask for: every line
+        // printed at the bottom of a full screen moves all of it.
+        if (self.scroll_bot > self.scroll_top) {
+            const moved = (self.scroll_bot - self.scroll_top) * self.cols;
+            const dst = self.idx(self.scroll_top, 0);
+            const src = self.idx(self.scroll_top + 1, 0);
+            @memmove(self.cells[dst..][0..moved], self.cells[src..][0..moved]);
+            @memmove(
+                self.wrapped[self.scroll_top..self.scroll_bot],
+                self.wrapped[self.scroll_top + 1 .. self.scroll_bot + 1],
+            );
         }
         const last = self.idx(self.scroll_bot, 0);
         self.eraseRange(last, last + self.cols);
