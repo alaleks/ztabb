@@ -1,6 +1,7 @@
 //! Tab list: one pty plus one terminal screen per tab.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const pty = @import("pty");
 const term = @import("term");
 const ssh = @import("ssh");
@@ -325,28 +326,72 @@ pub const Tabs = struct {
         return self.items[0..self.count];
     }
 
+    /// How long one pass will spend taking output from the panes.
+    ///
+    /// A budget in time, not in bytes, because a byte does not cost a fixed
+    /// amount: the same log line is six times dearer to absorb on a large
+    /// window than a small one, since each line scrolls the whole screen.
+    /// Measured here, two megabytes is three hundredths of a second on a
+    /// 120x30 window and a fifth of a second on 240x70 -- and a fifth of a
+    /// second is a window that has stopped responding.
+    ///
+    /// The bound it replaces was eight reads of sixteen kilobytes per pane,
+    /// which at sixty frames a second holds the window near eight megabytes a
+    /// second however fast it can actually parse. A program printing faster
+    /// than the window drains blocks on its own write, so that bound decided
+    /// how far behind the screen ran -- and kept it there after the program
+    /// was interrupted, which is why Ctrl-C looked as though it had not taken.
+    ///
+    /// Eight milliseconds leaves half of a sixty-hertz frame to draw in.
+    pub const PUMP_MS: i64 = 8;
+
+    /// Milliseconds from some fixed point, spelled for the platform. Only
+    /// differences are ever taken, so the origin does not matter.
+    const clock = if (builtin.os.tag == .windows) struct {
+        extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
+        fn ms() i64 {
+            return @intCast(GetTickCount64());
+        }
+    } else struct {
+        const timeval = extern struct { sec: i64, usec: i32 };
+        extern "c" fn gettimeofday(tv: *timeval, tz: ?*anyopaque) c_int;
+        fn ms() i64 {
+            var tv: timeval = undefined;
+            _ = gettimeofday(&tv, null);
+            return tv.sec * 1000 + @divTrunc(tv.usec, 1000);
+        }
+    };
+
     /// Drains every tab's pty, not just the focused one: a background shell
     /// whose output buffer fills up would otherwise block forever.
     /// Returns true if any tab produced output.
+    ///
+    /// One read per pane per pass, going round until everything is quiet or
+    /// the budget runs out, so a chatty pane cannot starve the rest.
     pub fn pumpAll(self: *Tabs) bool {
-        var buf: [16 * 1024]u8 = undefined;
+        var buf: [64 * 1024]u8 = undefined;
         var any = false;
-        for (self.slice()) |*t| {
-            for (&t.slots) |*slot| {
-                const p = if (slot.*) |*v| v else continue;
-                // Bound the per-frame work so one chatty pane cannot starve
-                // the rest of the window.
-                for (0..8) |_| {
+        const deadline = clock.ms() + PUMP_MS;
+
+        var spoke = true;
+        while (spoke) {
+            spoke = false;
+            for (self.slice()) |*t| {
+                for (&t.slots) |*slot| {
+                    const p = if (slot.*) |*v| v else continue;
                     const n = p.pty.read(&buf) catch {
                         _ = p.pty.poll();
-                        break;
+                        continue;
                     };
-                    if (n == 0) break;
+                    if (n == 0) continue;
                     p.terminal.write(buf[0..n]);
                     any = true;
-                    if (n < buf.len) break;
+                    spoke = true;
                 }
             }
+            // Checked once a round rather than once a read: a round is bounded
+            // by the number of panes, and the check is not free.
+            if (clock.ms() >= deadline) break;
         }
         return any;
     }
@@ -783,6 +828,33 @@ test "pumpAll drains background tabs too" {
     }
     try testing.expect(found);
     try testing.expectEqual(@as(usize, 1), tabs.active_idx);
+}
+
+test "one pass drains every pane, not the first one it finds" {
+    // The budget is shared, so a pane with a great deal to say must not spend
+    // it all before the others are looked at. The size of that budget is a
+    // throughput question and is measured rather than asserted here; what this
+    // pins is the fairness, which is a property of the loop.
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "one", 40, 8);
+    _ = try addTestTab(&tabs, "two", 40, 8);
+
+    try tabs.items[0].active().pty.write("first\n");
+    try tabs.items[1].active().pty.write("second\n");
+
+    var both = false;
+    for (0..POLL_TURNS) |_| {
+        _ = tabs.pumpAll();
+        const a = tabs.items[0].active().terminal.cellAt(0, 0).ch;
+        const b = tabs.items[1].active().terminal.cellAt(0, 0).ch;
+        if (a == 'f' and b == 's') {
+            both = true;
+            break;
+        }
+        sleepMs(POLL_MS);
+    }
+    try testing.expect(both);
 }
 
 test "reapExited closes tabs whose child is gone" {
