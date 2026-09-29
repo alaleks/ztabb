@@ -69,6 +69,23 @@ const POLL_MS: u32 = 10;
 /// Turns, giving every wait below the same couple of seconds.
 const POLL_TURNS: usize = 200;
 
+/// Windows-only step markers.
+///
+/// The Windows suite wedges in CI with no sign of where: the test runner prints
+/// a test's name before running it, so a hang in the body and a hang in a
+/// `defer` look the same from outside, and the calls this file makes into
+/// ConPTY are the ones that can wait for ever. CI prints the last line a
+/// wedged suite managed to write, so a marker before each of those calls names
+/// the one that never returned.
+///
+/// Off everywhere else, so no other platform's output changes.
+const trace_steps = builtin.os.tag == .windows;
+
+fn step(comptime name: []const u8) void {
+    if (!trace_steps) return;
+    std.debug.print("      [step] " ++ name ++ "\n", .{});
+}
+
 /// A command that prints and exits, spelled for the platform.
 fn echoArgv() []const [*:0]const u8 {
     return if (posix_only)
@@ -172,8 +189,14 @@ test "poll reports a finished child" {
 }
 
 test "waitReadable reports data and times out when there is none" {
+    step("spawn");
     var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);
-    defer pty.close();
+    defer {
+        step("close");
+        pty.close();
+        step("closed");
+    }
+    step("spawned");
 
     // A console host paints its screen the moment it starts, so on Windows
     // there is something to read before anything has been typed. Drain that
@@ -192,9 +215,12 @@ test "waitReadable reports data and times out when there is none" {
         _ = pty.waitReadable(POLL_MS);
     }
 
+    step("assert a quiet pty times out");
     try testing.expect(!pty.waitReadable(20));
 
+    step("write");
     try pty.write("ping\n");
+    step("wait for the echo");
     const answered = pty.waitReadable(2000);
     if (!answered) {
         std.debug.print(
@@ -205,9 +231,11 @@ test "waitReadable reports data and times out when there is none" {
     }
     try testing.expect(answered);
 
+    step("read the echo");
     var buf: [64]u8 = undefined;
     const n = try pty.read(&buf);
     try testing.expect(n > 0);
+    step("body done");
 }
 
 test "resize does not fail on a live pty" {
@@ -266,22 +294,33 @@ test "a live child is never reported as exited" {
 }
 
 test "write does not block a child that has stopped reading" {
+    step("spawn a child that does not read");
     var pty = try Pty.spawn(sleepArgv(), &.{}, 80, 24);
-    defer pty.close();
+    defer {
+        step("close");
+        pty.close();
+        step("closed");
+    }
 
     // Far more than any input buffer holds. A child that never reads fills the
     // pipe, and a blocking write would wedge this test for ever; the pty must
     // drop the overflow and return instead.
     var junk = [_]u8{'x'} ** (256 * 1024);
+    step("write more than the pipe holds");
     try pty.write(&junk);
+    step("write returned");
 }
 
 test "closing a pty twice is harmless" {
+    step("spawn");
     var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);
+    step("first close");
     pty.close();
+    step("second close");
     // The second close must be a no-op, not a double free of the pty's
     // internals.
     pty.close();
+    step("closed twice");
 }
 
 test "spawnShell starts the user's shell and it responds" {

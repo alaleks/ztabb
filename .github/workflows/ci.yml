@@ -191,8 +191,13 @@ jobs:
             done
             if kill -0 "$pid" 2>/dev/null; then
               kill -9 "$pid" 2>/dev/null || true
-              printf '%-10s WEDGED after %ss, last line: %s\n' \
-                "$name" "$waited" "$(tail -1 "$logs/$name.log")"
+              printf '%-10s WEDGED after %ss\n' "$name" "$waited"
+              # One line names the test but not the call inside it. The tail
+              # carries the step markers the suite prints on Windows, and the
+              # last of those is the call that never returned.
+              printf '\n%s\n' "----- $name, where it stopped -----"
+              tail -20 "$logs/$name.log"
+              printf '%s\n\n' "----- end of $name -----"
               continue
             fi
 
