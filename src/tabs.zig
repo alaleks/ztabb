@@ -1032,15 +1032,42 @@ test "an unfocused pane's output still marks the tab as needing a redraw" {
     var seen = false;
     for (0..POLL_TURNS) |_| {
         _ = tabs.pumpAll();
-        if (tab.anyDirty()) {
+        // Waited on for this pane rather than for any of them.
+        //
+        // Splitting resizes every pane of the tab, and where the console
+        // repaints itself on being resized -- ConPTY does -- the focused pane
+        // speaks first. That satisfied "any pane is dirty" before the
+        // background one had said anything, and the assertion that followed
+        // then failed on the race rather than on the behaviour.
+        if (tab.pane(right).?.terminal.dirty) {
             seen = true;
             break;
         }
         sleepMs(POLL_MS);
     }
     try testing.expect(seen);
-    // And it is the background pane that is dirty, not the focused one.
-    try testing.expect(tab.pane(right).?.terminal.dirty);
+    // Which is the question the window actually asks before it redraws.
+    try testing.expect(tab.anyDirty());
+}
+
+/// Whether a screen holds `needle` on any of its rows.
+///
+/// Asked instead of looking at one cell: what these tests mean is whether a
+/// pane was told something, and a console that repaints itself when it is
+/// resized -- ConPTY does, and splitting resizes every pane -- puts its own
+/// marks on a screen that was never written to.
+fn screenHas(t: *const term.Terminal, needle: []const u8) bool {
+    var buf: [8192]u8 = undefined;
+    var r: u32 = 0;
+    while (r < t.rows) : (r += 1) {
+        var n: usize = 0;
+        for (t.viewRow(r)) |c| {
+            if (n + 4 > buf.len) break;
+            n += std.unicode.utf8Encode(if (c.ch == 0) ' ' else c.ch, buf[n..]) catch break;
+        }
+        if (std.mem.indexOf(u8, buf[0..n], needle) != null) return true;
+    }
+    return false;
 }
 
 test "keys and output go to the focused pane only" {
@@ -1051,14 +1078,23 @@ test "keys and output go to the focused pane only" {
     const right = tabs.splitActive(.horizontal) catch return;
 
     const tab = tabs.active().?;
-    try tab.active().pty.write("echo pane\n");
+    try testing.expectEqual(right, tab.focused);
+    try tab.active().pty.write("echo pane-marker\n");
+
+    var arrived = false;
     for (0..POLL_TURNS) |_| {
         _ = tabs.pumpAll();
-        if (tab.pane(right).?.terminal.cellAt(0, 0).ch != ' ') break;
+        if (screenHas(&tab.pane(right).?.terminal, "pane-marker")) {
+            arrived = true;
+            break;
+        }
         sleepMs(POLL_MS);
     }
-    // The other pane never saw it.
-    try testing.expectEqual(@as(u21, ' '), tab.pane(0).?.terminal.cellAt(0, 0).ch);
+    try testing.expect(arrived);
+    // The other pane never saw what was typed. Asked of the text rather than
+    // of an empty cell, so that a console repainting itself does not read as
+    // the keystrokes having gone to the wrong pane.
+    try testing.expect(!screenHas(&tab.pane(0).?.terminal, "pane-marker"));
 }
 
 test "resizing the window re-lays every pane" {
