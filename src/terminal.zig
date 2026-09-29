@@ -336,6 +336,13 @@ pub const Terminal = struct {
         self.wrapped = new_wrapped;
         // Rebuilt in order, so the ring starts again from the top.
         self.row_base = 0;
+        // The buffer swapped out is rebuilt in order too -- blank, above --
+        // so the turn recorded for it no longer describes anything. Left
+        // behind, `leaveAltScreen` restores it over a screen that is no longer
+        // turned that way, and one taken at a taller size is not even a row of
+        // this one: the screen comes back rotated and every row written after
+        // it lands in the wrong place.
+        self.alt_base = 0;
         self.cols = c;
         self.rows = r;
         self.cursor_row = @min(self.cursor_row, r - 1);
@@ -517,6 +524,10 @@ pub const Terminal = struct {
         self.sb_wrapped = new_sb_wrapped;
         // Rebuilt in order, so the ring starts again from the top.
         self.row_base = 0;
+        // Reflow only runs off the alternate screen, so there is no turn to
+        // keep -- but the invariant that `alt_base` is a row of this screen
+        // holds without having to know that.
+        self.alt_base = 0;
         self.cols = c;
         self.rows = r;
         self.sb_rows = hist_keep;
@@ -2984,4 +2995,117 @@ test "fuzzing with escape-heavy input never panics" {
     try testing.expect(t.cursor_row < t.rows);
     try testing.expect(t.cursor_col < t.cols);
     if (t.onAltScreen()) t.write("\x1b[?1049l");
+}
+
+test "fuzzing resize, scrolling and selection together never panics or leaks" {
+    // The suite above fuzzes writing into a terminal of one fixed size. What
+    // that never reaches is the interesting part of the ring: `row_base` moving
+    // under a resize, the scrollback filling and being read back through a
+    // scrolled viewport, and a selection held in absolute rows while the rows
+    // it names retire into history. Every reader is called on every round, so
+    // an index that escapes its buffer is caught where it happens rather than
+    // whenever the renderer next runs.
+    const seqs = [_][]const u8{
+        "\x1b[2J",                                                            "\x1b[H",    "\x1b[999;999H", "\x1b[?1049h",
+        "\x1b[?1049l",                                                        "\x1b[999S", "\x1b[999T",     "\x1b[999L",
+        "\x1b[999M",                                                          "\x1b[999B", "\x1b[999C",     "\x1b[1;1r",
+        "\x1b[3;7r",                                                          "\x1b[0m",   "\x1b[7m",       "\x1b[999X",
+        "\x1b[999@",                                                          "\x1b[999P", "\x1b[J",        "\x1b[1J",
+        "\x1b]0;t\x07",                                                       "\r\n",      "\n",            "\x1b[K",
+        "long line that certainly wraps around the edge of a narrow screen ",
+    };
+
+    var prng = std.Random.DefaultPrng.init(4242);
+    const rand = prng.random();
+
+    for (0..40) |round| {
+        const cols = 1 + rand.uintLessThan(u32, 40);
+        const rows = 1 + rand.uintLessThan(u32, 16);
+        var t = try Terminal.init(testing.allocator, cols, rows, rand.uintLessThan(u32, 24));
+        defer t.deinit();
+
+        for (0..120) |_| {
+            switch (rand.uintLessThan(u8, 8)) {
+                0, 1, 2 => t.write(seqs[rand.uintLessThan(usize, seqs.len)]),
+                3 => try t.resize(1 + rand.uintLessThan(u32, 40), 1 + rand.uintLessThan(u32, 16)),
+                4 => t.scrollView(rand.intRangeAtMost(i32, -40, 40)),
+                5 => t.scrollToBottom(),
+                6 => {
+                    // Every row, through every accessor the renderer uses.
+                    for (0..t.rows) |r| {
+                        const row: u32 = @intCast(r);
+                        try testing.expectEqual(t.cols, t.viewRow(row).len);
+                        try testing.expect(t.absRow(row) <= t.absRows());
+                        _ = t.cellAt(row, rand.uintLessThan(u32, t.cols));
+                    }
+                    for (0..t.absRows()) |i| {
+                        try testing.expectEqual(t.cols, t.srcRow(@intCast(i)).len);
+                    }
+                },
+                7 => {
+                    // Rows and columns deliberately reach past the end: a
+                    // selection outlives the text it named once that text has
+                    // scrolled away, and clamping it is this function's job.
+                    const n = t.absRows();
+                    const sel = Selection{
+                        .anchor_row = rand.uintLessThan(u32, n + 3),
+                        .anchor_col = rand.uintLessThan(u32, t.cols + 3),
+                        .head_row = rand.uintLessThan(u32, n + 3),
+                        .head_col = rand.uintLessThan(u32, t.cols + 3),
+                        .active = true,
+                    };
+                    var buf: [8 * 1024]u8 = undefined;
+                    const text = selectedText(&t, sel, &buf);
+                    try testing.expect(text.len <= buf.len);
+                },
+                else => unreachable,
+            }
+
+            // Invariants that must hold after every single operation.
+            try testing.expect(t.cursor_row < t.rows);
+            try testing.expect(t.cursor_col < t.cols);
+            try testing.expect(t.scroll_top <= t.scroll_bot);
+            try testing.expect(t.scroll_bot < t.rows);
+            try testing.expect(t.row_base < t.rows);
+            try testing.expect(t.sb_len <= t.sb_rows);
+            try testing.expect(t.view_offset <= t.sb_len);
+        }
+        _ = round;
+    }
+}
+
+test "resizing on the alternate screen does not leave the ring turned" {
+    // Found by fuzzing. Entering the alternate screen puts the main screen's
+    // turn aside in `alt_base`; a resize rebuilds both buffers in order and so
+    // makes that turn meaningless, and one taken while the screen was taller
+    // is not even a row of the shorter one. Restored as it was, the screen came
+    // back rotated: `physRow` maps through `% rows`, so nothing reads out of
+    // bounds and nothing crashes -- the rows simply appear in the wrong order,
+    // and every row written afterwards lands in the wrong place.
+    var t = try testTerm(8, 4);
+    defer t.deinit();
+
+    // Scroll the main screen so its ring is turned; four full screens of
+    // output leave `row_base` somewhere other than zero.
+    for (0..9) |i| {
+        var buf: [8]u8 = undefined;
+        t.write(std.fmt.bufPrint(&buf, "L{d}\r\n", .{i}) catch unreachable);
+    }
+    try testing.expect(t.row_base != 0);
+
+    t.write("\x1b[?1049h"); // into the alternate screen
+    try testing.expectEqual(@as(u32, 0), t.row_base);
+    try testing.expect(t.alt_base != 0);
+
+    try t.resize(8, 2); // shrink past the turn that was put aside
+    t.write("\x1b[?1049l"); // and back out
+
+    try testing.expect(t.row_base < t.rows);
+
+    // The restored screen must read in order, not rotated: what is written now
+    // has to appear on the row it was written to.
+    t.write("\x1b[H\x1b[2Jtop\r\nbot");
+    var line: [8]u8 = undefined;
+    try testing.expectEqualStrings("top", rowText(&t, 0, &line));
+    try testing.expectEqualStrings("bot", rowText(&t, 1, &line));
 }
