@@ -143,7 +143,11 @@ jobs:
         # Six minutes leaves plenty of room for a slow runner while keeping the
         # cost of a hang -- and so of one debugging cycle -- down.
         timeout-minutes: 6
-        run: zig build test -j1
+        # `--summary all` so this step names the suite that failed on its own.
+        # The standalone step below only runs once something has already failed,
+        # and it is not always reached, so the primary step has to be legible by
+        # itself.
+        run: zig build test -j1 --summary all
 
       # Runs only when the step above failed.
       #

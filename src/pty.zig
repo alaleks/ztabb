@@ -371,12 +371,19 @@ test "closing a pty twice is harmless" {
 }
 
 test "spawnShell starts the user's shell and it responds" {
+    step("spawn the user's shell");
     var pty = try Pty.spawnShell(80, 24);
-    defer pty.close();
+    defer {
+        step("close");
+        pty.close();
+        step("closed");
+    }
 
     // A shell prints a prompt, so any output proves it reached the terminal;
     // `exit` then proves it is reading and can be reaped.
+    step("ask it to exit");
     try pty.write("exit\r");
+    step("drain what it said");
 
     // Drain until the shell stops talking, however the platform words that.
     var buf: [4096]u8 = undefined;
@@ -389,7 +396,9 @@ test "spawnShell starts the user's shell and it responds" {
             _ = pty.waitReadable(POLL_MS);
         }
     }
+    step("assert it said something");
     try testing.expect(total > 0);
+    step("wait for it to be reapable");
 
     // Then wait for it to become reapable, as a step of its own.
     //
@@ -410,5 +419,7 @@ test "spawnShell starts the user's shell and it responds" {
         }
         sleepMs(POLL_MS);
     }
+    step("assert it was reapable");
     try testing.expect(exited);
+    step("body done");
 }
