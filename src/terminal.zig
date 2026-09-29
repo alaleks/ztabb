@@ -883,6 +883,13 @@ pub const Terminal = struct {
         self.fg = self.alt_saved.fg;
         self.bg = self.alt_saved.bg;
         self.attrs = self.alt_saved.attrs;
+        // Whatever asked for the mouse asked for it while it owned the screen,
+        // and it does not own it any more. A full-screen program that is
+        // interrupted often restores the screen and forgets the mouse, and the
+        // terminal then keeps reporting clicks to a shell that has no idea
+        // what they are -- which prints them, so a stray click leaves
+        // something like `51;66;7M` sitting on the command line.
+        self.mouse = .{};
         self.dirty = true;
     }
 
@@ -2235,6 +2242,24 @@ test "moving the cursor does cancel a pending wrap" {
     t.write("X");
     try testing.expectEqual(@as(u32, 0), t.cursor_row);
     try testing.expectEqual(@as(u21, 'X'), t.cellAt(0, 2).ch);
+}
+
+test "leaving the alternate screen gives the mouse back" {
+    // A full-screen program that is interrupted often puts the screen back and
+    // forgets to turn mouse reporting off. Left on, the next click is sent to
+    // the shell, which has no idea what it is and prints it -- `51;66;7M` and
+    // the like, sitting on the command line.
+    var t = try testTerm(10, 4);
+    defer t.deinit();
+
+    t.write("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+    try testing.expect(t.mouse.wants());
+    try testing.expect(t.onAltScreen());
+
+    t.write("\x1b[?1049l");
+    try testing.expect(!t.onAltScreen());
+    try testing.expect(!t.mouse.wants());
+    try testing.expect(!t.mouse.sgr);
 }
 
 test "mouse reporting modes are tracked" {
