@@ -43,12 +43,34 @@ const GRACE_MS: DWORD = 200;
 /// front end really wants.
 const OUT_PIPE_BYTES: DWORD = 1 << 20;
 const IN_PIPE_BYTES: DWORD = 4 * 1024;
+/// How long a write to the child may wait before the rest is dropped.
+///
+/// A child that has stopped reading its input must not stop the thread that
+/// draws: the POSIX side drops such a write, and this is that bound. Long
+/// enough that a child merely busy for a moment still gets the keystroke,
+/// short enough that the worst case costs a few frames rather than the
+/// session.
+const WRITE_MS: DWORD = 50;
+const PIPE_ACCESS_OUTBOUND: DWORD = 0x00000002;
+const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
+const FILE_FLAG_FIRST_PIPE_INSTANCE: DWORD = 0x00080000;
+const GENERIC_READ: DWORD = 0x80000000;
+const OPEN_EXISTING: DWORD = 3;
+const ERROR_IO_PENDING: DWORD = 997;
 const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x00080000;
 const STARTF_USESTDHANDLES: DWORD = 0x00000100;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
 const HANDLE_FLAG_INHERIT: DWORD = 0x00000001;
 
 const COORD = extern struct { x: i16, y: i16 };
+
+const OVERLAPPED = extern struct {
+    Internal: usize = 0,
+    InternalHigh: usize = 0,
+    Offset: DWORD = 0,
+    OffsetHigh: DWORD = 0,
+    hEvent: ?HANDLE = null,
+};
 
 const SECURITY_ATTRIBUTES = extern struct {
     nLength: DWORD,
@@ -91,6 +113,41 @@ const PROCESS_INFORMATION = extern struct {
     dwThreadId: DWORD,
 };
 
+extern "kernel32" fn CreateNamedPipeW(
+    lpName: [*:0]const u16,
+    dwOpenMode: DWORD,
+    dwPipeMode: DWORD,
+    nMaxInstances: DWORD,
+    nOutBufferSize: DWORD,
+    nInBufferSize: DWORD,
+    nDefaultTimeOut: DWORD,
+    lpSecurityAttributes: ?*SECURITY_ATTRIBUTES,
+) callconv(.winapi) HANDLE;
+extern "kernel32" fn CreateFileW(
+    lpFileName: [*:0]const u16,
+    dwDesiredAccess: DWORD,
+    dwShareMode: DWORD,
+    lpSecurityAttributes: ?*SECURITY_ATTRIBUTES,
+    dwCreationDisposition: DWORD,
+    dwFlagsAndAttributes: DWORD,
+    hTemplateFile: ?HANDLE,
+) callconv(.winapi) HANDLE;
+extern "kernel32" fn CreateEventW(
+    lpEventAttributes: ?*SECURITY_ATTRIBUTES,
+    bManualReset: BOOL,
+    bInitialState: BOOL,
+    lpName: ?[*:0]const u16,
+) callconv(.winapi) ?HANDLE;
+extern "kernel32" fn ResetEvent(hEvent: HANDLE) callconv(.winapi) BOOL;
+extern "kernel32" fn CancelIoEx(hFile: HANDLE, lpOverlapped: ?*OVERLAPPED) callconv(.winapi) BOOL;
+extern "kernel32" fn GetOverlappedResult(
+    hFile: HANDLE,
+    lpOverlapped: *OVERLAPPED,
+    lpNumberOfBytesTransferred: *DWORD,
+    bWait: BOOL,
+) callconv(.winapi) BOOL;
+extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
+extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 extern "kernel32" fn CreatePipe(
     hReadPipe: *HANDLE,
     hWritePipe: *HANDLE,
@@ -169,6 +226,9 @@ extern "kernel32" fn GetEnvironmentVariableW(
     nSize: DWORD,
 ) callconv(.winapi) DWORD;
 
+/// Makes each pty's input pipe name unique within this process.
+var pipe_seq: std.atomic.Value(u32) = .init(0);
+
 pub const SpawnError = error{
     OpenPtyFailed,
     ForkFailed,
@@ -181,9 +241,9 @@ pub const Pty = struct {
     /// Our end of the pipes: what the child writes, and what it reads.
     out_read: HANDLE,
     in_write: HANDLE,
-    /// The console's read end of the input pipe, kept so `write` can see how
-    /// full the pipe is and drop instead of blocking on a full buffer.
-    in_read: HANDLE,
+    /// Signalled when an asynchronous write to the input pipe finishes. One
+    /// write is in flight at a time, so one event is enough.
+    in_event: HANDLE,
     console: HPCON,
     process: HANDLE,
     thread: HANDLE,
@@ -224,11 +284,59 @@ pub const Pty = struct {
         var in_write: HANDLE = undefined;
         if (!CreatePipe(&out_read, &out_write, null, OUT_PIPE_BYTES).toBool()) return error.OpenPtyFailed;
         errdefer _ = CloseHandle(out_read);
-        if (!CreatePipe(&in_read, &in_write, null, IN_PIPE_BYTES).toBool()) {
+        // The input pipe is a named one, unlike the output pipe, because
+        // `write` has to be able to give up on it. `CreatePipe` hands back
+        // handles that can only be written synchronously, and the only way to
+        // ask such a pipe how much room is left is to peek at the end the
+        // console host reads from -- which deadlocks: the file system
+        // serialises requests per pipe instance, so a peek queues behind the
+        // host's own blocking read, and that read finishes only once we have
+        // written. `CreateNamedPipeW` takes FILE_FLAG_OVERLAPPED, so the write
+        // can be posted and abandoned instead, and the host's end is never
+        // touched. The client connects below, which is why no
+        // `ConnectNamedPipe` is needed.
+        var name_buf: [64]u8 = undefined;
+        const name = std.fmt.bufPrint(
+            &name_buf,
+            "\\\\.\\pipe\\ztabb-in-{d}-{d}",
+            .{ GetCurrentProcessId(), pipe_seq.fetchAdd(1, .monotonic) },
+        ) catch unreachable;
+        var name_w: [96]u16 = undefined;
+        const name_len = std.unicode.utf8ToUtf16Le(&name_w, name) catch {
+            _ = CloseHandle(out_write);
+            return error.OpenPtyFailed;
+        };
+        name_w[name_len] = 0;
+        const name_z: [*:0]const u16 = @ptrCast(&name_w);
+
+        in_write = CreateNamedPipeW(
+            name_z,
+            PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            0, // byte stream, blocking mode: the overlapped flag does the waiting
+            1,
+            IN_PIPE_BYTES,
+            0,
+            0,
+            null,
+        );
+        if (in_write == INVALID_HANDLE_VALUE) {
             _ = CloseHandle(out_write);
             return error.OpenPtyFailed;
         }
         errdefer _ = CloseHandle(in_write);
+
+        in_read = CreateFileW(name_z, GENERIC_READ, 0, null, OPEN_EXISTING, 0, null);
+        if (in_read == INVALID_HANDLE_VALUE) {
+            _ = CloseHandle(out_write);
+            return error.OpenPtyFailed;
+        }
+
+        const in_event = CreateEventW(null, .TRUE, .FALSE, null) orelse {
+            _ = CloseHandle(in_read);
+            _ = CloseHandle(out_write);
+            return error.OpenPtyFailed;
+        };
+        errdefer _ = CloseHandle(in_event);
 
         // Our ends must not reach the child, or it inherits a copy of the pipe
         // and the read never reports end of file when the child exits.
@@ -245,11 +353,12 @@ pub const Pty = struct {
         // reached nobody, and the only thing ever to come back down the pipe
         // was conhost's own sixteen-byte handshake. On a terminal that means a
         // window that shows nothing a program prints.
-        // `out_write` closes after the child is created, as the comment above
-        // explains. `in_read` is different: `write` peeks at it to see how full
-        // the input pipe is, so it lives as long as the pty does.
-        errdefer _ = CloseHandle(in_read);
+        // Both of the console's ends close once the child exists. Holding
+        // either open for longer keeps a reference on the device, and the
+        // documentation is explicit that this stops a broken channel from ever
+        // looking broken.
         defer {
+            _ = CloseHandle(in_read);
             _ = CloseHandle(out_write);
         }
 
@@ -318,7 +427,7 @@ pub const Pty = struct {
         return .{
             .out_read = out_read,
             .in_write = in_write,
-            .in_read = in_read,
+            .in_event = in_event,
             .console = console,
             .process = pi.hProcess,
             .thread = pi.hThread,
@@ -356,32 +465,35 @@ pub const Pty = struct {
 
     pub fn write(self: *Pty, buf: []const u8) error{Closed}!void {
         var off: usize = 0;
-        var stalls: u8 = 0;
         while (off < buf.len) {
-            // The input pipe holds IN_PIPE_BYTES; its read end reports how many
-            // bytes are still waiting to be consumed. Writing no more than the
-            // room left never blocks, and a full pipe means the child has
-            // stopped reading -- drop the overflow instead of stalling the UI
-            // thread, the way the POSIX side does.
-            var queued: DWORD = 0;
-            if (!PeekNamedPipe(self.in_read, null, 0, null, &queued, null).toBool()) {
-                return error.Closed;
-            }
-            if (queued >= IN_PIPE_BYTES) {
-                stalls += 1;
-                if (stalls > 16) return;
-                Sleep(1);
+            const want: DWORD = @intCast(@min(buf.len - off, IN_PIPE_BYTES));
+            var ov = OVERLAPPED{ .hEvent = self.in_event };
+            _ = ResetEvent(self.in_event);
+
+            var put: DWORD = 0;
+            if (WriteFile(self.in_write, buf[off..].ptr, want, &put, @ptrCast(&ov)).toBool()) {
+                // Room was there: the write finished inside the call, which is
+                // what typing into a healthy child does every time.
+                if (put == 0) return error.Closed;
+                off += put;
                 continue;
             }
-            stalls = 0;
-            const room: DWORD = IN_PIPE_BYTES - queued;
-            const want: DWORD = @intCast(@min(buf.len - off, room));
-            var put: DWORD = 0;
-            if (!WriteFile(self.in_write, buf[off..].ptr, want, &put, null).toBool()) {
-                return error.Closed;
+            if (GetLastError() != ERROR_IO_PENDING) return error.Closed;
+
+            if (WaitForSingleObject(self.in_event, WRITE_MS) != WAIT_OBJECT_0) {
+                // The child is not draining its input. Take the write back and
+                // drop what is left, rather than hold up the caller: the same
+                // bargain the POSIX side makes.
+                _ = CancelIoEx(self.in_write, &ov);
+                var cancelled: DWORD = 0;
+                _ = GetOverlappedResult(self.in_write, &ov, &cancelled, .TRUE);
+                return;
             }
-            if (put == 0) return error.Closed;
-            off += put;
+
+            var done: DWORD = 0;
+            if (!GetOverlappedResult(self.in_write, &ov, &done, .FALSE).toBool()) return error.Closed;
+            if (done == 0) return error.Closed;
+            off += done;
         }
     }
 
@@ -455,7 +567,7 @@ pub const Pty = struct {
 
         _ = CloseHandle(self.in_write);
         _ = CloseHandle(self.out_read);
-        _ = CloseHandle(self.in_read);
+        _ = CloseHandle(self.in_event);
         ClosePseudoConsole(self.console);
 
         if (!self.exited) {

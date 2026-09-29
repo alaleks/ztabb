@@ -188,6 +188,33 @@ test "poll reports a finished child" {
     try testing.expect(exited);
 }
 
+/// Reads until `want` shows up or the turns run out. Windows echoes through a
+/// console host, so what comes back arrives in pieces and carries escape
+/// sequences around it; only the presence of the text is asserted.
+fn awaitText(pty: *Pty, want: []const u8) bool {
+    // A console host repaints a whole screen, so this has to hold more than the
+    // echoed line itself. What does not fit is dropped from the front, which is
+    // harmless: the text being looked for is far shorter than one read.
+    var seen: [16 * 1024]u8 = undefined;
+    var len: usize = 0;
+    for (0..POLL_TURNS) |_| {
+        const n = pty.read(seen[len..]) catch return false;
+        if (n > 0) {
+            len += n;
+            if (std.mem.indexOf(u8, seen[0..len], want) != null) return true;
+            if (seen.len - len < 4096) {
+                // Keep the tail, so text split across two reads still matches.
+                const keep = want.len;
+                std.mem.copyForwards(u8, seen[0..keep], seen[len - keep ..][0..keep]);
+                len = keep;
+            }
+            continue;
+        }
+        _ = pty.waitReadable(POLL_MS);
+    }
+    return false;
+}
+
 test "waitReadable reports data and times out when there is none" {
     step("spawn");
     var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);
@@ -309,6 +336,26 @@ test "write does not block a child that has stopped reading" {
     step("write more than the pipe holds");
     try pty.write(&junk);
     step("write returned");
+}
+
+test "two ptys at once each get their own input pipe" {
+    // On Windows the input channel is a named pipe, created with
+    // FILE_FLAG_FIRST_PIPE_INSTANCE so that a name collision fails loudly
+    // rather than quietly wiring two panes to one console. Every pane in a
+    // session is a pty of its own, so the names have to differ.
+    var a = try Pty.spawn(catArgv(), &.{}, 80, 24);
+    defer a.close();
+    var b = try Pty.spawn(catArgv(), &.{}, 80, 24);
+    defer b.close();
+
+    step("write to both");
+    try a.write("first\n");
+    try b.write("second\n");
+
+    // Each has to come back with its own text, not the other's and not both.
+    step("read both back");
+    try testing.expect(awaitText(&a, "first"));
+    try testing.expect(awaitText(&b, "second"));
 }
 
 test "closing a pty twice is harmless" {
