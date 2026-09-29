@@ -461,3 +461,52 @@ test "load tolerates a missing config file" {
     defer cfg.deinit();
     for (cfg.hosts) |h| try testing.expect(h.alias.len > 0);
 }
+
+test "fuzzing the config parser never panics and keeps every host usable" {
+    // This parser is handed a file from the user's disk at startup, and lays it
+    // out into fields of fixed width. What it must never do is overrun one, or
+    // hand back a host `command` cannot spell -- both would be reached before
+    // the window is even up.
+    const words = [_][]const u8{
+        "Host",           "HostName",             "User",       "Port", "IdentityFile",
+        "Match",          "ProxyJump",            "*",          "?",    "!secret",
+        "a",              "h1",                   "\"quoted\"", "#c",   "=",
+        "\t",             " ",                    "\r",         "",     "x" ** (MAX_FIELD - 1),
+        "y" ** MAX_FIELD, "z" ** (MAX_FIELD + 7),
+    };
+
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const rand = prng.random();
+
+    var text: std.ArrayListUnmanaged(u8) = .empty;
+    defer text.deinit(testing.allocator);
+
+    for (0..600) |_| {
+        text.clearRetainingCapacity();
+        for (0..rand.uintLessThan(usize, 30)) |_| {
+            for (0..rand.uintLessThan(usize, 5)) |_| {
+                try text.appendSlice(testing.allocator, words[rand.uintLessThan(usize, words.len)]);
+                if (rand.boolean()) try text.append(testing.allocator, ' ');
+            }
+            try text.append(testing.allocator, '\n');
+        }
+
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var hosts: std.ArrayListUnmanaged(Host) = .empty;
+        try parseText(arena.allocator(), text.items, &hosts);
+
+        try testing.expect(hosts.items.len <= MAX_HOSTS);
+        for (hosts.items) |h| {
+            // A parsed alias has to be spellable as a command, or the picker
+            // offers a row that cannot be connected to.
+            try testing.expect(h.alias.len > 0);
+            var buf: [MAX_FIELD:0]u8 = undefined;
+            const cmd = h.command(&buf) catch |err| {
+                try testing.expectEqual(error.NameTooLong, err);
+                continue;
+            };
+            try testing.expect(std.mem.len(cmd) == h.alias.len);
+        }
+    }
+}
