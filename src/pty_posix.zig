@@ -85,6 +85,12 @@ pub const Pty = struct {
     /// Set once the child has been reaped; the tab may then be closed.
     exited: bool = false,
     exit_status: u32 = 0,
+    /// Set once `close` has run. Without it a second close would close the
+    /// master's descriptor number a second time -- and a descriptor number is
+    /// reused as soon as it is free, so the second close would land on whatever
+    /// file had been opened since. The Windows side guards this already; the
+    /// two sides present one API and have to honour it alike.
+    closed: bool = false,
     /// The size the child was last told about.
     cols: u16,
     rows: u16,
@@ -228,6 +234,9 @@ pub const Pty = struct {
     /// So the wait is bounded and escalates, the way the ConPTY side already
     /// did: ask, then insist.
     pub fn close(self: *Pty) void {
+        if (self.closed) return;
+        self.closed = true;
+
         _ = libc.close(self.master);
         if (self.exited) return;
 

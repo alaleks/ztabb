@@ -358,6 +358,27 @@ test "two ptys at once each get their own input pipe" {
     try testing.expect(awaitText(&b, "second"));
 }
 
+test "a second close does not reach a pty opened since the first" {
+    // The test below proves a second close does not crash. It cannot prove the
+    // dangerous part, because nothing has taken the closed descriptor back.
+    // Descriptors are handed out lowest free first, so the pty opened here very
+    // likely sits on the number the first one gave up -- and a close that ran
+    // twice would shut this one instead of nothing at all.
+    var first = try Pty.spawn(catArgv(), &.{}, 80, 24);
+    first.close();
+
+    var second = try Pty.spawn(catArgv(), &.{}, 80, 24);
+    defer second.close();
+
+    step("close the first pty a second time");
+    first.close();
+
+    // The second pty has to be untouched: still writable, still answering.
+    step("prove the second still works");
+    try second.write("alive\n");
+    try testing.expect(awaitText(&second, "alive"));
+}
+
 test "closing a pty twice is harmless" {
     step("spawn");
     var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);
