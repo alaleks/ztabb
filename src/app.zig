@@ -1170,9 +1170,41 @@ pub fn shortcutFor(key: u32, mods: u16) ?Action {
 /// Returns null for keys that produce no bytes (modifiers, and printable keys,
 /// which arrive as a TEXT_INPUT event instead so that dead keys, IME and
 /// non-Latin layouts work).
+/// The final letter of the CSI a cursor-ish key carries its modifiers on, or
+/// null for a key that has no such form.
+fn cursorFinal(key: u32) ?u8 {
+    return switch (key) {
+        sdl.SDLK_UP => 'A',
+        sdl.SDLK_DOWN => 'B',
+        sdl.SDLK_RIGHT => 'C',
+        sdl.SDLK_LEFT => 'D',
+        sdl.SDLK_END => 'F',
+        sdl.SDLK_HOME => 'H',
+        else => null,
+    };
+}
+
 pub fn encodeKey(key: u32, mods: u16, buf: []u8) ?[]const u8 {
     const ctrl = mods & sdl.KMOD_CTRL != 0;
     const alt = mods & sdl.KMOD_ALT != 0;
+    const shift = mods & sdl.KMOD_SHIFT != 0;
+
+    // An arrow, Home or End held with Control or Shift carries that in the
+    // sequence itself: `\x1b[1;5C` is control and the right arrow, which is
+    // how a shell is told to step a word rather than a character. These
+    // arrived bare before, so holding a modifier did nothing whatever.
+    //
+    // Alt is left as it was, an ESC prefix on the plain sequence: shells have
+    // been reading that form as Meta for decades, and the tests below pin it.
+    if (!alt and (ctrl or shift)) {
+        if (cursorFinal(key)) |final| {
+            // 1 plus a bit each for shift, alt and control, as every terminal
+            // that speaks this spells it.
+            const code: u8 = 1 + @as(u8, if (shift) 1 else 0) + @as(u8, if (ctrl) 4 else 0);
+            return std.fmt.bufPrint(buf, "\x1b[1;{d}{c}", .{ code, final }) catch null;
+        }
+    }
+
     var n: usize = 0;
 
     // Meta is sent as an ESC prefix, the convention every shell understands.
@@ -1316,6 +1348,34 @@ test "the copy and paste shortcuts are reachable in both spellings" {
     try testing.expectEqualSlices(u8, "\x03", encodeKey(sdl.SDLK_C, sdl.KMOD_LCTRL, &buf).?);
 }
 
+test "an arrow held with control or shift carries the modifier" {
+    // Bare arrows step a character; the modified forms are how a shell is told
+    // to step a word, or to extend a selection. They used to arrive bare, so
+    // Ctrl and the left arrow did exactly what the left arrow did.
+    try expectKey(sdl.SDLK_LEFT, sdl.KMOD_LCTRL, "\x1b[1;5D");
+    try expectKey(sdl.SDLK_RIGHT, sdl.KMOD_RCTRL, "\x1b[1;5C");
+    try expectKey(sdl.SDLK_UP, sdl.KMOD_LCTRL, "\x1b[1;5A");
+    try expectKey(sdl.SDLK_DOWN, sdl.KMOD_LCTRL, "\x1b[1;5B");
+    try expectKey(sdl.SDLK_HOME, sdl.KMOD_LCTRL, "\x1b[1;5H");
+    try expectKey(sdl.SDLK_END, sdl.KMOD_LCTRL, "\x1b[1;5F");
+
+    try expectKey(sdl.SDLK_LEFT, sdl.KMOD_LSHIFT, "\x1b[1;2D");
+    try expectKey(sdl.SDLK_RIGHT, sdl.KMOD_RSHIFT, "\x1b[1;2C");
+
+    // Both together, which is 1 + 1 + 4.
+    try expectKey(sdl.SDLK_LEFT, sdl.KMOD_LCTRL | sdl.KMOD_LSHIFT, "\x1b[1;6D");
+}
+
+test "a bare arrow is still bare, and Alt still means Meta" {
+    // The modified forms must not leak into the unmodified ones, and the ESC
+    // prefix Alt has always used is what shells read as Meta.
+    try expectKey(sdl.SDLK_LEFT, 0, "\x1b[D");
+    try expectKey(sdl.SDLK_RIGHT, 0, "\x1b[C");
+    try expectKey(sdl.SDLK_HOME, 0, "\x1b[H");
+    try expectKey(sdl.SDLK_END, 0, "\x1b[F");
+    try expectKey(sdl.SDLK_LEFT, sdl.KMOD_RALT, "\x1b\x1b[D");
+}
+
 test "no plain letter or digit is stolen from the shell" {
     // A single mis-mapped key silently stops that character from ever being
     // typed, so check the whole printable range rather than a sample.
@@ -1435,8 +1495,13 @@ test "unmapped keys produce nothing" {
 }
 
 test "ctrl with a key that has no control code falls back to the plain sequence" {
+    // Keys with no control byte and no modified form send what they always
+    // send. The arrows used to be listed here too, and are not any longer:
+    // they carry the modifier now, which is the whole point of the form.
     try expectKey(sdl.SDLK_F1, sdl.KMOD_LCTRL, "\x1bOP");
-    try expectKey(sdl.SDLK_UP, sdl.KMOD_LCTRL, "\x1b[A");
+    try expectKey(sdl.SDLK_F5, sdl.KMOD_LCTRL, "\x1b[15~");
+    try expectKey(sdl.SDLK_PAGEUP, sdl.KMOD_LCTRL, "\x1b[5~");
+    try expectKey(sdl.SDLK_DELETE, sdl.KMOD_LCTRL, "\x1b[3~");
 }
 
 test "encodeKey never writes past a short buffer" {
