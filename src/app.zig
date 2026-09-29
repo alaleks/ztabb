@@ -91,6 +91,9 @@ pub const App = struct {
     /// Where the pointer was last seen, so a drag held beyond the edge of the
     /// grid keeps scrolling while it is not moving.
     drag_y: f32 = 0,
+    /// The tab the pointer is resting on, whose name scrolls while it is too
+    /// long to sit still.
+    hover_tab: ?usize = null,
     menu: ?MenuState = null,
     picker: ?Picker = null,
     picker_rows: [ssh.MAX_HOSTS]rnd.HostRow = undefined,
@@ -335,7 +338,7 @@ pub const App = struct {
             const scrolled = self.autoScroll();
             // A turning mark has to be redrawn to turn, and the wait below
             // would otherwise let the window doze off mid-connection.
-            const connecting = self.tabs.anyConnecting();
+            const connecting = self.tabs.anyConnecting() or self.marqueeRunning();
             if (connecting) self.ui_dirty = true;
             if (self.tabs.reapExited() > 0) {
                 self.ui_dirty = true;
@@ -701,6 +704,9 @@ pub const App = struct {
             if (was != m.hovered) self.ui_dirty = true;
             return;
         }
+        const hover_scale: f32 = self.density;
+        self.noteHover(ev.x * hover_scale, ev.y * hover_scale);
+
         if (!self.dragging) return;
         const tab = self.tabs.active() orelse return;
         const scale: f32 = self.density;
@@ -713,6 +719,39 @@ pub const App = struct {
             sel.active = true;
             self.ui_dirty = true;
         }
+    }
+
+    /// Remembers which tab the pointer is resting on, if any.
+    ///
+    /// Only a name too long to fit does anything with it, and only while it is
+    /// rested on: nothing in the bar moves unless it is being asked to.
+    fn noteHover(self: *App, x: f32, y: f32) void {
+        const was = self.hover_tab;
+        self.hover_tab = null;
+        if (y >= self.title_h and y < self.chromeH()) {
+            const bar = self.renderer.tabBar(self.tabs.count, @floatFromInt(self.win_w));
+            switch (bar.hit(x, y - self.title_h)) {
+                .tab => |i| self.hover_tab = i,
+                .close => |i| self.hover_tab = i,
+                else => {},
+            }
+        }
+        if (was != self.hover_tab) self.ui_dirty = true;
+    }
+
+    /// Whether a name is scrolling under the pointer, which has to be redrawn
+    /// to scroll and must not let the window doze off while it does.
+    fn marqueeRunning(self: *App) bool {
+        const i = self.hover_tab orelse return false;
+        if (i >= self.tabs.count) return false;
+        return rnd.marqueeSpan(self.tabs.items[i].labelParts()) > self.labelBudget();
+    }
+
+    /// Cells a tab's name has to sit in, which is what decides whether it has
+    /// to scroll to be read.
+    fn labelBudget(self: *const App) u32 {
+        const bar = self.renderer.tabBar(self.tabs.count, @floatFromInt(self.win_w));
+        return self.renderer.tabLabelBudget(bar);
     }
 
     /// Keeps scrolling while a drag is held past the top or bottom of the grid.
@@ -1012,9 +1051,7 @@ pub const App = struct {
             self.title_h,
             macos.trafficLightsWidth() * self.density,
         );
-        // A tenth of a second a step: fast enough to read as motion, slow
-        // enough not to blur.
-        self.renderer.drawTabBar(&self.tabs, th_, width, self.title_h, @intCast(sdl.ticks() / 100));
+        self.renderer.drawTabBar(&self.tabs, th_, width, self.title_h, sdl.ticks(), self.hover_tab);
 
         if (self.tabs.active()) |tab| {
             var rects: [panes.MAX_PANES]panes.Rect = @splat(.{});

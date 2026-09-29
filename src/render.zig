@@ -684,9 +684,13 @@ pub const Renderer = struct {
         th: *const theme.Theme,
         width: f32,
         top: f32,
-        /// Which step of the turn a connecting tab's mark is on.
-        step: usize,
+        /// Milliseconds, for anything that moves.
+        now_ms: u64,
+        /// The tab the pointer is over, whose name scrolls if it is too long
+        /// to sit still.
+        hover: ?usize,
     ) void {
+        const step = now_ms / 100;
         const cw: f32 = @floatFromInt(self.cellW());
         const bar = self.tabBar(tabs.count, width);
         const bar_h = bar.height();
@@ -740,10 +744,21 @@ pub const Renderer = struct {
             // the right of its name, so the label has to give up the room.
             const spin_room = if (tab.connecting) self.spinnerWidth() else 0;
             const budget: u32 = @intFromFloat(@max(0, (room - spin_room) / self.uiCellW()));
+            const label_y = self.uiTextY(top, bar_h);
+
+            // A name the pointer is resting on scrolls, so the whole of it can
+            // be read without opening the tab. Only that one: a bar of names
+            // all sliding at once is a thing to look away from, and nothing
+            // moves unless it is being asked to.
+            if (hover == i and marqueeSpan(tab.labelParts()) > budget) {
+                _ = self.drawMarquee(tab.labelParts(), label_x, label_y, budget, fg, now_ms);
+                continue;
+            }
+
             const label_end = self.drawTabLabel(
                 tab.labelParts(),
                 label_x,
-                self.uiTextY(top, bar_h),
+                label_y,
                 budget,
                 fg,
                 th.tab_inactive_fg,
@@ -844,6 +859,56 @@ pub const Renderer = struct {
     /// When the parts do not fit, the trailing context goes first and the
     /// leading path is elided from the left, because the last component is
     /// what tells two tabs apart.
+    /// Cells a tab's name has to sit in, so the caller can ask the same
+    /// question the bar answers when it draws.
+    pub fn tabLabelBudget(self: *const Renderer, bar: TabBar) u32 {
+        const cw: f32 = @floatFromInt(self.cellW());
+        const tab_w = bar.tabWidth();
+        const label_x = TAB_PAD_CELLS * cw + self.iconDrawSize() + TAB_GAP_CELLS * cw;
+        const room = tab_w - label_x - if (bar.hasClose())
+            cw * @as(f32, @floatFromInt(TAB_CLOSE_CELLS))
+        else
+            cw / 2;
+        return @intFromFloat(@max(0, room / self.uiCellW()));
+    }
+
+    /// Draws a window onto a label that is too long to fit, scrolled along.
+    ///
+    /// A whole cell at a time rather than smoothly: a glyph is drawn whole, so
+    /// a fractional offset would spill one into the tab next door, and there
+    /// is no clipping here to catch it. The parts lose their light and dark
+    /// while it moves -- what matters then is reading the name, not its shape.
+    fn drawMarquee(
+        self: *Renderer,
+        parts: tabs_mod.Tab.Label,
+        x: f32,
+        y: f32,
+        budget: u32,
+        colour: u32,
+        now_ms: u64,
+    ) f32 {
+        var buf: [tabs_mod.MAX_LABEL * 3 + 8]u8 = undefined;
+        var n: usize = 0;
+        for ([_][]const u8{ parts.prefix, parts.name }) |part| {
+            const take = @min(part.len, buf.len - n);
+            @memcpy(buf[n..][0..take], part[0..take]);
+            n += take;
+        }
+        if (parts.suffix.len > 0 and n < buf.len) {
+            buf[n] = ' ';
+            n += 1;
+            const take = @min(parts.suffix.len, buf.len - n);
+            @memcpy(buf[n..][0..take], parts.suffix[0..take]);
+            n += take;
+        }
+        const full = buf[0..n];
+
+        const off = marqueeOffset(cellLen(full), budget, now_ms);
+        const start = utf8Advance(full, 0, off);
+        const end = utf8Advance(full, start, budget);
+        return x + self.drawUiText(full[start..end], x, y, colour);
+    }
+
     /// Draws the label and returns the x just past it.
     ///
     /// Returned rather than recomputed: what was actually drawn depends on the
@@ -873,6 +938,7 @@ pub const Renderer = struct {
             at += self.drawUiText(text, at, y, dim);
         }
         at += self.drawUiText(fitted.name, at, y, bright);
+        if (fitted.name_elided) at += self.drawUiText("\u{2026}", at, y, dim);
         if (fitted.suffix.len > 0) {
             at += self.uiCellW();
             at += self.drawUiText(fitted.suffix, at, y, dim);
@@ -1357,6 +1423,8 @@ pub const FittedLabel = struct {
     suffix: []const u8 = "",
     /// The prefix was cut from the left and wants an ellipsis in front of it.
     elided: bool = false,
+    /// The name itself was cut, and wants an ellipsis after it.
+    name_elided: bool = false,
 };
 
 /// Trims a split label down to `budget` cells, giving up the least useful part
@@ -1380,10 +1448,18 @@ pub fn fitParts(parts: tabs_mod.Tab.Label, budget: u32) FittedLabel {
         return out;
     }
 
-    // Not even the name fits: keep its tail, which is the part that differs.
+    // Not even the name fits: keep its head. What tells two tabs apart is
+    // nearly always where a name starts -- an ssh profile, a project
+    // directory -- and this kept the tail instead, so `nms_debug_server_21`
+    // showed up as `server_21` with no sign that anything was missing.
     out.prefix = "";
     out.elided = false;
-    out.name = tailCells(out.name, budget);
+    if (budget >= 2) {
+        out.name = headCells(out.name, budget - 1); // one cell for the ellipsis
+        out.name_elided = true;
+    } else {
+        out.name = headCells(out.name, budget);
+    }
     return out;
 }
 
@@ -1425,6 +1501,45 @@ fn cellLen(s: []const u8) u32 {
     var n: u32 = 0;
     while (it.nextCodepoint()) |_| n += 1;
     return n;
+}
+
+/// How many cells a label wants if nothing is cut from it.
+pub fn marqueeSpan(parts: tabs_mod.Tab.Label) u32 {
+    var n = cellLen(parts.prefix) + cellLen(parts.name);
+    if (parts.suffix.len > 0) n += 1 + cellLen(parts.suffix);
+    return n;
+}
+
+/// Where a scrolling label has got to: how many cells of it are off to the
+/// left, given the width on show and how long it has been scrolling.
+///
+/// It rests at each end rather than sliding round and round, so a name that is
+/// only a little too long is readable at a glance and one that is much too
+/// long still comes back to its beginning.
+pub fn marqueeOffset(span: u32, budget: u32, now_ms: u64) u32 {
+    if (span <= budget) return 0;
+    const travel: u64 = span - budget;
+    const rest_ms: u64 = 1400;
+    const step_ms: u64 = 220;
+    const moving = travel * step_ms;
+    const cycle = rest_ms + moving + rest_ms + moving;
+    const at = now_ms % cycle;
+
+    if (at < rest_ms) return 0;
+    if (at < rest_ms + moving) return @intCast((at - rest_ms) / step_ms);
+    if (at < rest_ms + moving + rest_ms) return @intCast(travel);
+    return @intCast(travel - @min(travel, (at - rest_ms - moving - rest_ms) / step_ms));
+}
+
+/// The first `cells` code points of `s`, on a code-point boundary.
+fn headCells(s: []const u8, cells: u32) []const u8 {
+    if (cells == 0) return "";
+    var i: usize = 0;
+    var n: u32 = 0;
+    while (i < s.len and n < cells) : (n += 1) {
+        i += std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+    }
+    return s[0..@min(i, s.len)];
 }
 
 /// The last `cells` code points of `s`, on a code-point boundary.
@@ -1938,11 +2053,68 @@ test "the name is never sacrificed while it still fits" {
     try testing.expect(cellLen(f.prefix) + cellLen(f.name) + 1 <= 8);
 }
 
-test "a name too long for the tab keeps its tail" {
+test "a name too long for the tab keeps its head" {
+    // The tail used to be kept, on the reasoning that it is the part that
+    // differs. That holds for a path and not for a name: two ssh profiles are
+    // told apart by how they start, and `nms_debug_server_21` cut to its tail
+    // reads as `server_21` with nothing to say it was cut at all.
     const f = fitParts(label("~/x/", "averylongdirectoryname", ""), 6);
     try testing.expectEqualStrings("", f.prefix);
-    try testing.expectEqual(@as(u32, 6), cellLen(f.name));
-    try testing.expect(std.mem.endsWith(u8, "averylongdirectoryname", f.name));
+    try testing.expect(f.name_elided);
+    try testing.expectEqual(@as(u32, 5), cellLen(f.name)); // the sixth is the ellipsis
+    try testing.expect(std.mem.startsWith(u8, "averylongdirectoryname", f.name));
+}
+
+test "two names that share a tail are still told apart" {
+    const a = fitParts(label("", "nms_debug_server_21", ""), 10);
+    const b = fitParts(label("", "nms_demo_server_21", ""), 10);
+    try testing.expect(!std.mem.eql(u8, a.name, b.name));
+}
+
+test "a budget of one leaves no room for an ellipsis" {
+    const f = fitParts(label("", "averylongname", ""), 1);
+    try testing.expect(!f.name_elided);
+    try testing.expectEqual(@as(u32, 1), cellLen(f.name));
+}
+
+test "a label that fits never scrolls" {
+    try testing.expectEqual(@as(u32, 0), marqueeOffset(5, 10, 0));
+    try testing.expectEqual(@as(u32, 0), marqueeOffset(10, 10, 999_999));
+}
+
+test "a scrolling label rests at both ends and comes back" {
+    const span: u32 = 30;
+    const budget: u32 = 10;
+    const travel: u32 = span - budget;
+
+    // It starts at the beginning and stays there long enough to be read.
+    try testing.expectEqual(@as(u32, 0), marqueeOffset(span, budget, 0));
+    try testing.expectEqual(@as(u32, 0), marqueeOffset(span, budget, 1_000));
+
+    // Then it walks to the far end, a cell at a time.
+    try testing.expect(marqueeOffset(span, budget, 1_400 + 220) > 0);
+    const at_end = marqueeOffset(span, budget, 1_400 + travel * 220);
+    try testing.expectEqual(travel, at_end);
+
+    // Rests there, then walks back to where it started.
+    try testing.expectEqual(travel, marqueeOffset(span, budget, 1_400 + travel * 220 + 700));
+    const cycle = 1_400 + travel * 220 + 1_400 + travel * 220;
+    try testing.expectEqual(@as(u32, 0), marqueeOffset(span, budget, cycle));
+}
+
+test "a scrolling label never runs past its own end" {
+    const span: u32 = 41;
+    const budget: u32 = 7;
+    var t: u64 = 0;
+    while (t < 60_000) : (t += 37) {
+        try testing.expect(marqueeOffset(span, budget, t) <= span - budget);
+    }
+}
+
+test "the span a label wants counts the gap before its suffix" {
+    try testing.expectEqual(@as(u32, 9), marqueeSpan(label("~/a/", "ztabb", "")));
+    // Four, five, a gap, and three.
+    try testing.expectEqual(@as(u32, 13), marqueeSpan(label("~/a/", "ztabb", "dir")));
 }
 
 test "a zero budget draws nothing" {
