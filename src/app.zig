@@ -333,6 +333,10 @@ pub const App = struct {
             if (had_input) self.tabs.awaitEcho(ECHO_WAIT_MS);
             const had_output = self.tabs.pumpAll();
             const scrolled = self.autoScroll();
+            // A turning mark has to be redrawn to turn, and the wait below
+            // would otherwise let the window doze off mid-connection.
+            const connecting = self.tabs.anyConnecting();
+            if (connecting) self.ui_dirty = true;
             if (self.tabs.reapExited() > 0) {
                 self.ui_dirty = true;
                 if (self.tabs.count == 0) self.running = false;
@@ -341,7 +345,7 @@ pub const App = struct {
             self.render();
 
             const now = sdl.ticks();
-            if (had_input or had_output or scrolled) {
+            if (had_input or had_output or scrolled or connecting) {
                 self.pacer.activity(now);
                 continue;
             }
@@ -1008,7 +1012,9 @@ pub const App = struct {
             self.title_h,
             macos.trafficLightsWidth() * self.density,
         );
-        self.renderer.drawTabBar(&self.tabs, th_, width, self.title_h);
+        // A tenth of a second a step: fast enough to read as motion, slow
+        // enough not to blur.
+        self.renderer.drawTabBar(&self.tabs, th_, width, self.title_h, @intCast(sdl.ticks() / 100));
 
         if (self.tabs.active()) |tab| {
             var rects: [panes.MAX_PANES]panes.Rect = @splat(.{});

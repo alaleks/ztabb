@@ -630,12 +630,47 @@ pub const Renderer = struct {
 
     // -- tab bar -----------------------------------------------------------
 
+    /// Dots in the ring, and so the number of steps it turns through.
+    pub const SPINNER_DOTS: usize = 8;
+
+    /// A ring of dots with one of them lit, drawn rather than set in a glyph.
+    ///
+    /// The built-in face carries no spinner, and a codepoint it does not have
+    /// comes out as a white square -- which is what a Braille or block spinner
+    /// would look like here. Drawn from rectangles it owes the font nothing.
+    fn drawSpinner(self: *Renderer, x: f32, top: f32, box_h: f32, lit: u32, dim: u32, step: usize) void {
+        const size = @round(self.iconDrawSize() * 0.75);
+        const dot = @max(1.0, @round(size / 5));
+        const radius = (size - dot) / 2;
+        const cx = x + size / 2;
+        const cy = top + box_h / 2;
+
+        for (0..SPINNER_DOTS) |i| {
+            const turn = @as(f32, @floatFromInt(i)) /
+                @as(f32, @floatFromInt(SPINNER_DOTS)) * std.math.tau;
+            self.fill(
+                @round(cx + radius * @sin(turn) - dot / 2),
+                @round(cy - radius * @cos(turn) - dot / 2),
+                dot,
+                dot,
+                if (i == step % SPINNER_DOTS) lit else dim,
+            );
+        }
+    }
+
+    /// The room a spinner asks for, in pixels, gap included.
+    fn spinnerWidth(self: *const Renderer) f32 {
+        return @round(self.iconDrawSize() * 0.75) + self.uiCellW() / 2;
+    }
+
     pub fn drawTabBar(
         self: *Renderer,
         tabs: *tabs_mod.Tabs,
         th: *const theme.Theme,
         width: f32,
         top: f32,
+        /// Which step of the turn a connecting tab's mark is on.
+        step: usize,
     ) void {
         const cw: f32 = @floatFromInt(self.cellW());
         const bar = self.tabBar(tabs.count, width);
@@ -686,7 +721,10 @@ pub const Renderer = struct {
                 cw * @as(f32, @floatFromInt(TAB_CLOSE_CELLS))
             else
                 cw / 2;
-            const budget: u32 = @intFromFloat(@max(0, room / self.uiCellW()));
+            // A tab still waiting on its connection keeps a turning mark to
+            // the right of its name, so the label has to give up the room.
+            const spin_room = if (tab.connecting) self.spinnerWidth() else 0;
+            const budget: u32 = @intFromFloat(@max(0, (room - spin_room) / self.uiCellW()));
             self.drawTabLabel(
                 tab.labelParts(),
                 label_x,
@@ -695,6 +733,18 @@ pub const Renderer = struct {
                 fg,
                 th.tab_inactive_fg,
             );
+
+            if (tab.connecting) {
+                const shown = @min(tab.labelParts().len(), budget);
+                self.drawSpinner(
+                    label_x + @as(f32, @floatFromInt(shown)) * self.uiCellW() + self.uiCellW() / 4,
+                    top,
+                    bar_h,
+                    if (is_active) th.ansi[4] else th.tab_inactive_fg,
+                    th.tab_border,
+                    step,
+                );
+            }
 
             if (bar.hasClose()) {
                 self.drawIcon(

@@ -29,6 +29,15 @@ pub const Tab = struct {
     tree: panes.Tree,
     focused: u8 = 0,
     kind: Kind,
+    /// An ssh tab that has not heard from the far end yet.
+    ///
+    /// There is no signal for "connected" to wait on -- `ssh` is just a
+    /// program -- so the first byte back stands for it. That is honest about
+    /// what it knows: the tab is waiting on something that has not answered.
+    /// It clears a little early if ssh itself says something first, a host key
+    /// prompt or a banner, which is also the moment the user has something to
+    /// look at.
+    connecting: bool = false,
     /// Name set when the tab was opened; the OSC title overrides it for
     /// display when the program sets one.
     label: [MAX_LABEL]u8,
@@ -261,6 +270,7 @@ pub const Tabs = struct {
             .tree = panes.Tree.single(),
             .focused = 0,
             .kind = kind,
+            .connecting = kind == .ssh,
             .label = [_]u8{0} ** MAX_LABEL,
             .label_len = 0,
         };
@@ -309,6 +319,15 @@ pub const Tabs = struct {
     pub fn prev(self: *Tabs) void {
         if (self.count == 0) return;
         self.active_idx = (self.active_idx + self.count - 1) % self.count;
+    }
+
+    /// Whether any tab is still waiting on a connection, which is what keeps
+    /// the window drawing while the mark beside its name turns.
+    pub fn anyConnecting(self: *const Tabs) bool {
+        for (self.items[0..self.count]) |*t| {
+            if (t.connecting) return true;
+        }
+        return false;
     }
 
     pub fn isActive(self: *const Tabs, idx: usize) bool {
@@ -385,6 +404,7 @@ pub const Tabs = struct {
                     };
                     if (n == 0) continue;
                     p.terminal.write(buf[0..n]);
+                    t.connecting = false;
                     any = true;
                     spoke = true;
                 }
@@ -855,6 +875,39 @@ test "one pass drains every pane, not the first one it finds" {
         sleepMs(POLL_MS);
     }
     try testing.expect(both);
+}
+
+test "an ssh tab waits on the far end, and stops when it speaks" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "remote", 40, 8);
+
+    // `addSsh` would want a host to reach, and what is under test is the
+    // waiting, so the tab is put in the state opening one leaves it in.
+    tabs.items[0].kind = .ssh;
+    tabs.items[0].connecting = true;
+    try testing.expect(tabs.anyConnecting());
+
+    try tabs.items[0].active().pty.write("hello\n");
+    var spoke = false;
+    for (0..POLL_TURNS) |_| {
+        _ = tabs.pumpAll();
+        if (!tabs.items[0].connecting) {
+            spoke = true;
+            break;
+        }
+        sleepMs(POLL_MS);
+    }
+    try testing.expect(spoke);
+    try testing.expect(!tabs.anyConnecting());
+}
+
+test "a shell tab is not waiting on anything" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "shell", 40, 8);
+    try testing.expect(!tabs.items[0].connecting);
+    try testing.expect(!tabs.anyConnecting());
 }
 
 test "reapExited closes tabs whose child is gone" {
