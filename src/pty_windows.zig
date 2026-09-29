@@ -42,7 +42,6 @@ const GRACE_MS: DWORD = 200;
 /// a reader thread that drains the pipe continuously, which is what a ConPTY
 /// front end really wants.
 const OUT_PIPE_BYTES: DWORD = 1 << 20;
-const IN_PIPE_BYTES: DWORD = 4 * 1024;
 const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x00080000;
 const STARTF_USESTDHANDLES: DWORD = 0x00000100;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
@@ -181,9 +180,6 @@ pub const Pty = struct {
     /// Our end of the pipes: what the child writes, and what it reads.
     out_read: HANDLE,
     in_write: HANDLE,
-    /// The console's read end of the input pipe, kept so `write` can see how
-    /// full the pipe is and drop instead of blocking on a full buffer.
-    in_read: HANDLE,
     console: HPCON,
     process: HANDLE,
     thread: HANDLE,
@@ -194,8 +190,9 @@ pub const Pty = struct {
 
     exited: bool = false,
     exit_status: u32 = 0,
-    /// Set once `close` has run, so a second close is a no-op rather than a
-    /// double free of the attribute buffer.
+    /// Set once `close` has run, so closing again is a no-op rather than a
+    /// second free of the attribute buffer and a second close of handles that
+    /// are not ours any more.
     closed: bool = false,
     /// The size the child was last told about.
     cols: u16,
@@ -224,7 +221,7 @@ pub const Pty = struct {
         var in_write: HANDLE = undefined;
         if (!CreatePipe(&out_read, &out_write, null, OUT_PIPE_BYTES).toBool()) return error.OpenPtyFailed;
         errdefer _ = CloseHandle(out_read);
-        if (!CreatePipe(&in_read, &in_write, null, IN_PIPE_BYTES).toBool()) {
+        if (!CreatePipe(&in_read, &in_write, null, 0).toBool()) {
             _ = CloseHandle(out_write);
             return error.OpenPtyFailed;
         }
@@ -245,11 +242,8 @@ pub const Pty = struct {
         // reached nobody, and the only thing ever to come back down the pipe
         // was conhost's own sixteen-byte handshake. On a terminal that means a
         // window that shows nothing a program prints.
-        // `out_write` closes after the child is created, as the comment above
-        // explains. `in_read` is different: `write` peeks at it to see how full
-        // the input pipe is, so it lives as long as the pty does.
-        errdefer _ = CloseHandle(in_read);
         defer {
+            _ = CloseHandle(in_read);
             _ = CloseHandle(out_write);
         }
 
@@ -318,7 +312,6 @@ pub const Pty = struct {
         return .{
             .out_read = out_read,
             .in_write = in_write,
-            .in_read = in_read,
             .console = console,
             .process = pi.hProcess,
             .thread = pi.hThread,
@@ -356,27 +349,9 @@ pub const Pty = struct {
 
     pub fn write(self: *Pty, buf: []const u8) error{Closed}!void {
         var off: usize = 0;
-        var stalls: u8 = 0;
         while (off < buf.len) {
-            // The input pipe holds IN_PIPE_BYTES; its read end reports how many
-            // bytes are still waiting to be consumed. Writing no more than the
-            // room left never blocks, and a full pipe means the child has
-            // stopped reading -- drop the overflow instead of stalling the UI
-            // thread, the way the POSIX side does.
-            var queued: DWORD = 0;
-            if (!PeekNamedPipe(self.in_read, null, 0, null, &queued, null).toBool()) {
-                return error.Closed;
-            }
-            if (queued >= IN_PIPE_BYTES) {
-                stalls += 1;
-                if (stalls > 16) return;
-                Sleep(1);
-                continue;
-            }
-            stalls = 0;
-            const room: DWORD = IN_PIPE_BYTES - queued;
-            const want: DWORD = @intCast(@min(buf.len - off, room));
             var put: DWORD = 0;
+            const want: DWORD = @intCast(@min(buf.len - off, std.math.maxInt(DWORD)));
             if (!WriteFile(self.in_write, buf[off..].ptr, want, &put, null).toBool()) {
                 return error.Closed;
             }
@@ -455,7 +430,6 @@ pub const Pty = struct {
 
         _ = CloseHandle(self.in_write);
         _ = CloseHandle(self.out_read);
-        _ = CloseHandle(self.in_read);
         ClosePseudoConsole(self.console);
 
         if (!self.exited) {
