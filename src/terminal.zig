@@ -162,6 +162,19 @@ pub const Terminal = struct {
     utf8_len: u3 = 0,
     utf8_need: u3 = 0,
 
+    /// Which physical row the top of the screen is sitting at.
+    ///
+    /// The screen's rows are held in a ring. Scrolling the whole of it turns
+    /// this index instead of moving every row, which is the difference between
+    /// a scroll costing the size of the screen and costing one row -- and a
+    /// line of output at the bottom of a full screen scrolls it every time.
+    ///
+    /// Nothing outside this file knows: `idx` and `wrapAt` do the turning, and
+    /// every row is still reached by its logical number.
+    row_base: u32 = 0,
+    /// The ring the alternate screen was entered from, to turn back to.
+    alt_base: u32 = 0,
+
     pub const DEFAULT_SCROLLBACK: u32 = 2000;
     /// Rows in the first scrollback allocation; it doubles from there.
     const SCROLLBACK_SEED: u32 = 128;
@@ -207,8 +220,20 @@ pub const Terminal = struct {
 
     // -- geometry ----------------------------------------------------------
 
+    /// Where a logical row actually sits.
+    fn physRow(self: *const Terminal, row: u32) u32 {
+        return (row + self.row_base) % self.rows;
+    }
+
+    /// A logical row's continuation flag. `wrapped` is a row per entry, so it
+    /// turns with the ring exactly as the cells do -- indexed straight, the
+    /// two would disagree about which row is which.
+    fn wrapAt(self: *const Terminal, row: u32) *bool {
+        return &self.wrapped[self.physRow(row)];
+    }
+
     fn idx(self: *const Terminal, row: u32, col: u32) usize {
-        return @as(usize, row) * self.cols + col;
+        return @as(usize, self.physRow(row)) * self.cols + col;
     }
 
     pub fn cellAt(self: *const Terminal, row: u32, col: u32) Cell {
@@ -289,7 +314,7 @@ pub const Terminal = struct {
         for (0..copy_rows) |row| {
             const src = self.cells[self.idx(@intCast(row), 0)..][0..copy_cols];
             @memcpy(new_cells[row * c ..][0..copy_cols], src);
-            new_wrapped[row] = self.wrapped[row];
+            new_wrapped[row] = self.wrapAt(@intCast(row)).*;
         }
 
         if (new_alt) |a| {
@@ -309,6 +334,8 @@ pub const Terminal = struct {
         self.gpa.free(self.wrapped);
         self.cells = new_cells;
         self.wrapped = new_wrapped;
+        // Rebuilt in order, so the ring starts again from the top.
+        self.row_base = 0;
         self.cols = c;
         self.rows = r;
         self.cursor_row = @min(self.cursor_row, r - 1);
@@ -352,7 +379,7 @@ pub const Terminal = struct {
             const slot = (self.sb_head + self.sb_rows - (self.sb_len - i)) % self.sb_rows;
             return self.sb_wrapped[slot];
         }
-        return self.wrapped[i - self.sb_len];
+        return self.wrapAt(i - self.sb_len).*;
     }
 
     /// The logical line starting at source row `start`: how many rows it
@@ -488,6 +515,8 @@ pub const Terminal = struct {
         self.wrapped = new_wrapped;
         self.sb = new_sb;
         self.sb_wrapped = new_sb_wrapped;
+        // Rebuilt in order, so the ring starts again from the top.
+        self.row_base = 0;
         self.cols = c;
         self.rows = r;
         self.sb_rows = hist_keep;
@@ -603,7 +632,7 @@ pub const Terminal = struct {
         if (self.sb_rows == 0) return; // growth failed; drop the row
         const dst = @as(usize, self.sb_head) * self.cols;
         @memcpy(self.sb[dst..][0..self.cols], self.cells[self.idx(row, 0)..][0..self.cols]);
-        self.sb_wrapped[self.sb_head] = self.wrapped[row];
+        self.sb_wrapped[self.sb_head] = self.wrapAt(row).*;
         self.sb_head = (self.sb_head + 1) % self.sb_rows;
         if (self.sb_len < self.sb_rows) self.sb_len += 1;
         // Keep the viewport anchored to the same text while it is scrolled back.
@@ -671,23 +700,27 @@ pub const Terminal = struct {
         if (to_history and self.scroll_top == 0 and self.scroll_bot == self.rows - 1) {
             self.pushScrollback(0);
         }
-        // One move for the whole region rather than one per row. Rows sit
-        // next to each other in `cells`, so the region is a single run, and a
-        // scroll is the dearest thing a line of output can ask for: every line
-        // printed at the bottom of a full screen moves all of it.
-        if (self.scroll_bot > self.scroll_top) {
-            const moved = (self.scroll_bot - self.scroll_top) * self.cols;
-            const dst = self.idx(self.scroll_top, 0);
-            const src = self.idx(self.scroll_top + 1, 0);
-            @memmove(self.cells[dst..][0..moved], self.cells[src..][0..moved]);
-            @memmove(
-                self.wrapped[self.scroll_top..self.scroll_bot],
-                self.wrapped[self.scroll_top + 1 .. self.scroll_bot + 1],
-            );
+        // Scrolling the whole screen turns the ring: the row that was at the
+        // top becomes the one at the bottom, and only it is cleared. That is
+        // the common case by far -- every line printed at the bottom of a full
+        // screen does it -- and it used to move the whole screen each time.
+        //
+        // A region narrower than the screen cannot be done that way, since the
+        // rows outside it must stay where they are, so it still moves rows.
+        if (self.scroll_top == 0 and self.scroll_bot == self.rows - 1) {
+            self.row_base = (self.row_base + 1) % self.rows;
+        } else if (self.scroll_bot > self.scroll_top) {
+            var r = self.scroll_top;
+            while (r < self.scroll_bot) : (r += 1) {
+                const dst = self.idx(r, 0);
+                const src = self.idx(r + 1, 0);
+                @memcpy(self.cells[dst..][0..self.cols], self.cells[src..][0..self.cols]);
+                self.wrapAt(r).* = self.wrapAt(r + 1).*;
+            }
         }
         const last = self.idx(self.scroll_bot, 0);
         self.eraseRange(last, last + self.cols);
-        self.wrapped[self.scroll_bot] = false;
+        self.wrapAt(self.scroll_bot).* = false;
         self.dirty = true;
     }
 
@@ -697,11 +730,11 @@ pub const Terminal = struct {
             const dst = self.idx(r, 0);
             const src = self.idx(r - 1, 0);
             @memcpy(self.cells[dst..][0..self.cols], self.cells[src..][0..self.cols]);
-            self.wrapped[r] = self.wrapped[r - 1];
+            self.wrapAt(r).* = self.wrapAt(r - 1).*;
         }
         const first = self.idx(self.scroll_top, 0);
         self.eraseRange(first, first + self.cols);
-        self.wrapped[self.scroll_top] = false;
+        self.wrapAt(self.scroll_top).* = false;
         self.dirty = true;
     }
 
@@ -709,7 +742,7 @@ pub const Terminal = struct {
     /// stops being a wrap. `newline` itself cannot clear the flag -- the
     /// autowrap path sets it and then calls through here.
     fn lineFeed(self: *Terminal) void {
-        self.wrapped[self.cursor_row] = false;
+        self.wrapAt(self.cursor_row).* = false;
         self.newline();
     }
 
@@ -726,7 +759,7 @@ pub const Terminal = struct {
         if (self.wrap_pending) {
             // The row ran out of columns rather than ending: mark it as
             // continuing before `newline` possibly retires it to history.
-            self.wrapped[self.cursor_row] = true;
+            self.wrapAt(self.cursor_row).* = true;
             self.cursor_col = 0;
             self.newline();
         }
@@ -756,13 +789,22 @@ pub const Terminal = struct {
     }
 
     pub fn eraseInDisplay(self: *Terminal, mode: u32) void {
-        const cur = self.idx(self.cursor_row, self.cursor_col);
         switch (mode) {
+            // A row is still one run, but the screen is not: rows are held in
+            // a ring, so anything spanning them is done a row at a time.
             0 => {
-                self.eraseRange(cur, self.cells.len);
-                @memset(self.wrapped[self.cursor_row..], false);
+                const from = self.idx(self.cursor_row, 0);
+                self.eraseRange(from + self.cursor_col, from + self.cols);
+                self.wrapAt(self.cursor_row).* = false;
+                var r = self.cursor_row + 1;
+                while (r < self.rows) : (r += 1) self.eraseRow(r);
             },
-            1 => self.eraseRange(0, cur + 1),
+            1 => {
+                var r: u32 = 0;
+                while (r < self.cursor_row) : (r += 1) self.eraseRow(r);
+                const from = self.idx(self.cursor_row, 0);
+                self.eraseRange(from, from + self.cursor_col + 1);
+            },
             2, 3 => {
                 self.eraseRange(0, self.cells.len);
                 @memset(self.wrapped, false);
@@ -772,6 +814,16 @@ pub const Terminal = struct {
         self.dirty = true;
     }
 
+    /// Blanks one row and forgets that it continued anywhere.
+    fn eraseRow(self: *Terminal, row: u32) void {
+        const at = self.idx(row, 0);
+        self.eraseRange(at, at + self.cols);
+        // A blank row continues nothing. The old whole-screen erase left this
+        // flag standing on the rows above the cursor, which reflow would then
+        // read as a line running on into the next.
+        self.wrapAt(row).* = false;
+    }
+
     pub fn eraseInLine(self: *Terminal, mode: u32) void {
         const row_start = self.idx(self.cursor_row, 0);
         const row_end = row_start + self.cols;
@@ -779,12 +831,12 @@ pub const Terminal = struct {
         switch (mode) {
             0 => {
                 self.eraseRange(cur, row_end);
-                self.wrapped[self.cursor_row] = false;
+                self.wrapAt(self.cursor_row).* = false;
             },
             1 => self.eraseRange(row_start, cur + 1),
             2 => {
                 self.eraseRange(row_start, row_end);
-                self.wrapped[self.cursor_row] = false;
+                self.wrapAt(self.cursor_row).* = false;
             },
             else => {},
         }
@@ -850,6 +902,7 @@ pub const Terminal = struct {
     pub fn reset(self: *Terminal) void {
         self.resetAttrs();
         self.leaveAltScreen();
+        self.row_base = 0;
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.cursor_visible = true;
@@ -885,6 +938,10 @@ pub const Terminal = struct {
         self.alt = alt;
         self.gpa.free(self.alt_wrapped);
         self.alt_wrapped = alt_wrapped;
+        // `alt` is the raw buffer, so the ring it was laid out with has to be
+        // kept with it. The screen being entered starts unturned.
+        self.alt_base = self.row_base;
+        self.row_base = 0;
         self.eraseRange(0, self.cells.len);
         @memset(self.wrapped, false);
         self.cursor_row = 0;
@@ -896,6 +953,7 @@ pub const Terminal = struct {
     fn leaveAltScreen(self: *Terminal) void {
         const alt = self.alt orelse return;
         @memcpy(self.cells, alt);
+        self.row_base = self.alt_base;
         @memcpy(self.wrapped, self.alt_wrapped[0..@min(self.alt_wrapped.len, self.wrapped.len)]);
         self.gpa.free(alt);
         self.gpa.free(self.alt_wrapped);
@@ -2344,6 +2402,94 @@ test "a selection can span the history and the screen" {
     };
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings("aaa\nbbb\nccc\nddd\neee", selectedText(&t, sel, &buf));
+}
+
+test "the screen reads right after the ring has been round" {
+    // Rows are held in a ring, so a screen that has scrolled more times than
+    // it has rows has been round more than once. Nothing above this file knows
+    // that, and the rows must still answer to their logical numbers.
+    var t = try testTerm(4, 3);
+    defer t.deinit();
+    t.write("L0\r\nL1\r\nL2\r\nL3\r\nL4\r\nL5\r\nL6\r\nL7\r\nL8\r\nL9");
+
+    try testing.expectEqual(@as(u21, 'L'), t.cellAt(0, 0).ch);
+    try testing.expectEqual(@as(u21, '7'), t.cellAt(0, 1).ch);
+    try testing.expectEqual(@as(u21, '8'), t.cellAt(1, 1).ch);
+    try testing.expectEqual(@as(u21, '9'), t.cellAt(2, 1).ch);
+}
+
+test "a continuation flag stays with its own row across a scroll" {
+    // `wrapped` is one entry per row, so it has to turn with the ring. Indexed
+    // straight, the cells and the flags would disagree about which row is
+    // which, and reflow would join the wrong lines together.
+    var t = try testTerm(4, 3);
+    defer t.deinit();
+    t.write("abcdefgh"); // wraps from the first row onto the second
+    try testing.expect(t.srcWrapped(t.sb_len));
+    t.write("\r\nxx\r\nyy\r\nzz"); // scroll it around
+
+    // The wrapped line has gone to history; the plain rows on screen are not
+    // marked as running on.
+    try testing.expect(!t.srcWrapped(t.sb_len));
+    try testing.expect(!t.srcWrapped(t.sb_len + 1));
+}
+
+test "erasing to the end of the screen works with the ring turned" {
+    var t = try testTerm(4, 3);
+    defer t.deinit();
+    t.write("aaa\r\nbbb\r\nccc\r\nddd"); // one scroll, so the ring has turned
+
+    t.write("\x1b[2;2H\x1b[J"); // to the middle row, erase onwards
+    try testing.expectEqual(@as(u21, 'b'), t.cellAt(0, 0).ch);
+    try testing.expectEqual(@as(u21, 'c'), t.cellAt(1, 0).ch);
+    try testing.expectEqual(@as(u21, ' '), t.cellAt(1, 1).ch);
+    try testing.expectEqual(@as(u21, ' '), t.cellAt(2, 0).ch);
+}
+
+test "erasing to the start of the screen works with the ring turned" {
+    var t = try testTerm(4, 3);
+    defer t.deinit();
+    t.write("aaa\r\nbbb\r\nccc\r\nddd");
+
+    t.write("\x1b[2;2H\x1b[1J"); // erase from the start up to the cursor
+    try testing.expectEqual(@as(u21, ' '), t.cellAt(0, 0).ch);
+    try testing.expectEqual(@as(u21, ' '), t.cellAt(1, 1).ch);
+    try testing.expectEqual(@as(u21, 'c'), t.cellAt(1, 2).ch);
+    try testing.expectEqual(@as(u21, 'd'), t.cellAt(2, 0).ch);
+}
+
+test "the alternate screen hands the ring back as it found it" {
+    var t = try testTerm(4, 3);
+    defer t.deinit();
+    t.write("aaa\r\nbbb\r\nccc\r\nddd");
+
+    t.write("\x1b[?1049h");
+    t.write("zzz\r\nyyy\r\nxxx\r\nwww"); // turn the alternate screen's own ring
+    t.write("\x1b[?1049l");
+
+    try testing.expectEqual(@as(u21, 'b'), t.cellAt(0, 0).ch);
+    try testing.expectEqual(@as(u21, 'c'), t.cellAt(1, 0).ch);
+    try testing.expectEqual(@as(u21, 'd'), t.cellAt(2, 0).ch);
+}
+
+test "a resize with the ring turned keeps the screen in order" {
+    var t = try testTerm(4, 3);
+    defer t.deinit();
+    t.write("aaa\r\nbbb\r\nccc\r\nddd");
+
+    try t.resize(4, 4);
+    // Whatever the reflow decides to keep, it must be in the right order and
+    // the ring must start again from the top.
+    try testing.expectEqual(@as(u32, 0), t.row_base);
+    var last: u21 = 0;
+    var r: u32 = 0;
+    while (r < t.rows) : (r += 1) {
+        const c = t.cellAt(r, 0).ch;
+        if (c == ' ') continue;
+        try testing.expect(c > last);
+        last = c;
+    }
+    try testing.expectEqual(@as(u21, 'd'), last);
 }
 
 test "mouse reporting modes are tracked" {
