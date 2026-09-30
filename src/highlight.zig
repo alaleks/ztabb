@@ -130,16 +130,32 @@ fn isNumber(word: []const u8) bool {
 /// Writes at most `out.len` tokens and returns the ones written; the caller
 /// sizes the buffer, so the highlighter never allocates.
 pub fn tokenize(input: []const u8, out: []Token) []Token {
+    var command_position = true;
+    return tokenizeFrom(input, out, &command_position);
+}
+
+/// `tokenize`, but resumable.
+///
+/// Scanning stops as soon as `out` is full rather than running to the end of
+/// the input and dropping what does not fit, and `command_position` is left
+/// saying what it said at that point. A caller with a small buffer can then
+/// carry on from the last token's end and classify the rest exactly as one
+/// pass over the whole line would have: whether a word is the program being
+/// run or an argument to it depends on what came before it, so a second pass
+/// that assumed a fresh start would call every continuation a command.
+fn tokenizeFrom(input: []const u8, out: []Token, command_position: *bool) []Token {
     var n: usize = 0;
     var i: usize = 0;
-    var command_position = true;
 
+    // Returns false when there was no room, so the caller stops where the
+    // token would have gone instead of scanning past it.
     const push = struct {
-        fn f(buf: []Token, count: *usize, kind: Kind, start: usize, end: usize) void {
-            if (count.* < buf.len and end > start) {
-                buf[count.*] = .{ .kind = kind, .start = start, .end = end };
-                count.* += 1;
-            }
+        fn f(buf: []Token, count: *usize, kind: Kind, start: usize, end: usize) bool {
+            if (end <= start) return true;
+            if (count.* >= buf.len) return false;
+            buf[count.*] = .{ .kind = kind, .start = start, .end = end };
+            count.* += 1;
+            return true;
         }
     }.f;
 
@@ -152,7 +168,7 @@ pub fn tokenize(input: []const u8, out: []Token) []Token {
         }
 
         if (c == '#') {
-            push(out, &n, .comment, i, input.len);
+            _ = push(out, &n, .comment, i, input.len);
             break;
         }
 
@@ -165,8 +181,8 @@ pub fn tokenize(input: []const u8, out: []Token) []Token {
             {
                 i += 1;
             }
-            push(out, &n, .operator, start, i);
-            command_position = resetsCommandPosition(input[start..i]);
+            if (!push(out, &n, .operator, start, i)) break;
+            command_position.* = resetsCommandPosition(input[start..i]);
             continue;
         }
 
@@ -185,8 +201,8 @@ pub fn tokenize(input: []const u8, out: []Token) []Token {
             }
             // An unterminated quote still highlights, which is the useful
             // behaviour while the line is being typed.
-            push(out, &n, .string, start, i);
-            command_position = false;
+            if (!push(out, &n, .string, start, i)) break;
+            command_position.* = false;
             continue;
         }
 
@@ -211,8 +227,8 @@ pub fn tokenize(input: []const u8, out: []Token) []Token {
             } else {
                 while (i < input.len and (std.ascii.isAlphanumeric(input[i]) or input[i] == '_')) i += 1;
             }
-            push(out, &n, .variable, start, i);
-            command_position = false;
+            if (!push(out, &n, .variable, start, i)) break;
+            command_position.* = false;
             continue;
         }
 
@@ -229,7 +245,7 @@ pub fn tokenize(input: []const u8, out: []Token) []Token {
             continue;
         }
 
-        const kind: Kind = if (command_position)
+        const kind: Kind = if (command_position.*)
             (if (isBuiltin(word)) .builtin else .command)
         else if (word[0] == '-' and word.len > 1)
             // `-5` is read as an option: on a command line `tail -5` is far
@@ -242,12 +258,12 @@ pub fn tokenize(input: []const u8, out: []Token) []Token {
         else
             .argument;
 
-        push(out, &n, kind, start, i);
+        if (!push(out, &n, kind, start, i)) break;
 
         // `VAR=value cmd` keeps the next word in command position.
-        const is_assignment = command_position and
+        const is_assignment = command_position.* and
             std.mem.indexOfScalar(u8, word, '=') != null and word[0] != '=';
-        if (!is_assignment) command_position = false;
+        if (!is_assignment) command_position.* = false;
     }
 
     return out[0..n];
@@ -275,11 +291,27 @@ pub fn colorize(
     const n = @min(input.len, colors.len);
     for (colors[0..n]) |*c| c.* = fallback;
 
+    // A bufferful at a time, carrying the classifier's state across, so a line
+    // with more tokens than fit is coloured to its end instead of losing its
+    // highlighting partway along. Only the bytes a colour can be written for
+    // are scanned at all.
     var buf: [64]Token = undefined;
-    for (tokenize(input, &buf)) |t| {
-        const color = t.kind.color(th);
-        var i = t.start;
-        while (i < @min(t.end, n)) : (i += 1) colors[i] = color;
+    var command_position = true;
+    var at: usize = 0;
+    while (at < n) {
+        const toks = tokenizeFrom(input[at..n], &buf, &command_position);
+        if (toks.len == 0) break;
+        for (toks) |t| {
+            const color = t.kind.color(th);
+            var i = at + t.start;
+            while (i < @min(at + t.end, n)) : (i += 1) colors[i] = color;
+        }
+        // Whatever filled the buffer stopped the scan, so the rest starts at
+        // the last token's end. No progress means nothing more can be read.
+        const consumed = toks[toks.len - 1].end;
+        if (consumed == 0) break;
+        at += consumed;
+        if (toks.len < buf.len) break;
     }
 }
 
@@ -532,4 +564,42 @@ test "fuzzing the tokenizer never panics or produces bad spans" {
             prev_end = t.end;
         }
     }
+}
+
+test "colorize colours a line with more tokens than its buffer holds" {
+    // `colorize` works through a buffer of 64 tokens. A line with more than
+    // that used to lose its highlighting from the 65th on, and the words after
+    // it were also misread: a second pass starting fresh calls whatever follows
+    // a command, because command position depends on what came before.
+    var line: [1024]u8 = undefined;
+    var n: usize = 0;
+    for (0..120) |i| {
+        const part: []const u8 = if (i == 0) "echo" else "arg";
+        @memcpy(line[n..][0..part.len], part);
+        n += part.len;
+        line[n] = ' ';
+        n += 1;
+    }
+    // A fresh command after an operator, far past the buffer's reach.
+    const tail = "; grep";
+    @memcpy(line[n..][0..tail.len], tail);
+    n += tail.len;
+    const input = line[0..n];
+
+    var colors: [1024]u32 = undefined;
+    const fallback: u32 = 0xDEADBE;
+    colorize(input, &theme.dark, fallback, colors[0..n]);
+
+    // The end of the line is coloured, not left to the fallback.
+    const grep_at = n - "grep".len;
+    for (colors[grep_at..n]) |c| try testing.expect(c != fallback);
+
+    // And `grep` after `;` still reads as a command rather than an argument,
+    // which only holds if the classifier's state crossed the buffer boundary.
+    try testing.expectEqual(theme.dark.hl_command, colors[grep_at]);
+
+    // The words before it are arguments, so the two colours really do differ
+    // and the check above is not passing by accident.
+    try testing.expect(theme.dark.hl_command != theme.dark.hl_unknown);
+    try testing.expectEqual(theme.dark.hl_unknown, colors[grep_at - 4]);
 }
