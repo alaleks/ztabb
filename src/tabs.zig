@@ -398,6 +398,36 @@ pub const Tabs = struct {
     ///
     /// One read per pane per pass, going round until everything is quiet or
     /// the budget runs out, so a chatty pane cannot starve the rest.
+    /// Dumps everything a child says to stderr as hex, when `ZTABB_TRACE` is
+    /// set in the environment.
+    ///
+    /// A rendering complaint -- a character that stays on screen, a line that
+    /// redraws wrong -- cannot be chased from a description: what matters is
+    /// the exact bytes the program sent, and a shell's line editor sends a
+    /// great many. Captured here they can be replayed into a terminal in a
+    /// test, which turns "it looked wrong" into something reproducible.
+    ///
+    /// Off unless asked for, and read once.
+    fn trace(bytes: []const u8) void {
+        const gate = struct {
+            var on: ?bool = null;
+        };
+        if (gate.on == null) gate.on = std.c.getenv("ZTABB_TRACE") != null;
+        if (!gate.on.?) return;
+
+        var line: [512]u8 = undefined;
+        var at: usize = 0;
+        while (at < bytes.len) {
+            const take = @min(bytes.len - at, line.len / 2);
+            var n: usize = 0;
+            for (bytes[at..][0..take]) |b| {
+                n += (std.fmt.bufPrint(line[n..], "{x:0>2}", .{b}) catch break).len;
+            }
+            std.debug.print("ZTRACE {s}\n", .{line[0..n]});
+            at += take;
+        }
+    }
+
     /// Writes everything to the focused pane, pacing itself against the
     /// child's echo, and returns how many bytes got through.
     ///
@@ -448,6 +478,7 @@ pub const Tabs = struct {
             // own budget would spend that budget on every chunk.
             const got = p.pty.read(&buf) catch 0;
             if (got > 0) {
+                trace(buf[0..got]);
                 p.terminal.write(buf[0..got]);
                 echoed += got;
             } else {
@@ -473,6 +504,7 @@ pub const Tabs = struct {
                         continue;
                     };
                     if (n == 0) continue;
+                    trace(buf[0..n]);
                     p.terminal.write(buf[0..n]);
                     t.connecting = false;
                     any = true;
