@@ -1418,15 +1418,15 @@ pub const FittedLabel = struct {
     elided: bool = false,
 };
 
-/// Trims a split label to `budget` cells by filling from the start and cutting
-/// whatever will not fit off the end, marked with a single ellipsis.
+/// Trims a split label to `budget` cells, cutting only ever from the end and
+/// marking what went with a single ellipsis.
 ///
-/// Only ever from the end. Cutting the leading path instead kept the name
-/// whole, which reads better in isolation and worse in a row of tabs: the text
-/// shifts sideways as the budget changes, and a name that starts with an
-/// ellipsis gives no clue what it is until the tab is opened. A label that
-/// always begins at its beginning can be read down the bar, and the ellipsis
-/// says plainly that there is more.
+/// What is shown always begins where a part begins. The name -- the directory,
+/// or the ssh profile -- is what tells two tabs apart, so it is never dropped
+/// and never cut from the front. The path in front of it is all or nothing: cut
+/// into, it becomes a fragment that says little and pushes the name sideways as
+/// the budget changes, which is what made a row of tabs hard to read down.
+/// Dropped whole, the label simply starts at the directory instead.
 pub fn fitParts(parts: tabs_mod.Tab.Label, budget: u32) FittedLabel {
     if (budget == 0) return .{};
 
@@ -1440,28 +1440,30 @@ pub fn fitParts(parts: tabs_mod.Tab.Label, budget: u32) FittedLabel {
         return .{ .prefix = parts.prefix, .name = parts.name, .suffix = parts.suffix };
     }
 
-    // One cell is kept back for the ellipsis that says something was cut --
-    // unless there is only one cell altogether, where a letter of the name
-    // carries more than an ellipsis on its own would.
+    // One cell is kept back for the ellipsis -- unless there is only one cell
+    // altogether, where a letter of the name carries more than an ellipsis
+    // on its own would.
     const room = if (budget > 1) budget - 1 else budget;
     var out = FittedLabel{ .elided = budget > 1 };
 
-    if (prefix_cells >= room) {
-        out.prefix = headCells(parts.prefix, room);
+    // The path stays only if the whole name fits beside it.
+    var left = room;
+    if (prefix_cells + name_cells <= room) {
+        out.prefix = parts.prefix;
+        out.name = parts.name;
+        left = room - prefix_cells - name_cells;
+    } else if (name_cells <= room) {
+        out.name = parts.name;
+        left = room - name_cells;
+    } else {
+        out.name = headCells(parts.name, room);
         return out;
     }
-    out.prefix = parts.prefix;
 
-    var left = room - prefix_cells;
-    if (name_cells >= left) {
-        out.name = headCells(parts.name, left);
-        return out;
-    }
-    out.name = parts.name;
-    left -= name_cells;
-
-    // The suffix is worth showing only with the space that separates it.
-    if (suffix_cells > 0 and left >= 2) out.suffix = headCells(parts.suffix, left - 1);
+    // Whatever is left goes to the trailing context, with its space -- but
+    // only if two characters of it survive. One, as in `prod ~\u{2026}`, says
+    // nothing and reads as debris.
+    if (suffix_cells > 0 and left >= 3) out.suffix = headCells(parts.suffix, left - 1);
     return out;
 }
 
@@ -2051,25 +2053,27 @@ test "the trailing context is cut, not dropped whole" {
     try testing.expect(cellLen(f.name) + 1 + cellLen(f.suffix) + 1 <= 10);
 }
 
-test "a label is kept from its beginning and cut at its end" {
-    const f = fitParts(label("~/a/b/c/", "ztabb", ""), 12);
-    try testing.expect(f.elided);
-    // The path survives whole, from its first character, and the cut falls on
-    // what comes after it.
-    try testing.expectEqualStrings("~/a/b/c/", f.prefix);
-    try testing.expectEqualStrings("zta", f.name);
-    try testing.expect(cellLen(f.prefix) + cellLen(f.name) + 1 <= 12);
+test "the path is dropped whole rather than cut, so the name survives" {
+    // Both of these have room for the directory but not for the path as well.
+    // Cutting the path would leave a fragment and shift the name along; giving
+    // it up leaves the label starting at the directory, which is the part that
+    // tells two tabs apart.
+    const near = fitParts(label("~/a/b/c/", "ztabb", ""), 12);
+    try testing.expectEqualStrings("", near.prefix);
+    try testing.expectEqualStrings("ztabb", near.name);
+    try testing.expect(near.elided);
+
+    const deep = fitParts(label("~/very/long/path/", "ztabb", ""), 8);
+    try testing.expectEqualStrings("", deep.prefix);
+    try testing.expectEqualStrings("ztabb", deep.name);
+    try testing.expect(deep.elided);
 }
 
-test "a prefix that fills the budget on its own is itself cut at the end" {
-    // The consequence of never cutting the front: a deep path in a narrow tab
-    // leaves no room for the directory at the end of it. What is shown still
-    // starts where the label starts, and the ellipsis says there is more.
-    const f = fitParts(label("~/very/long/path/", "ztabb", ""), 8);
-    try testing.expect(f.elided);
-    try testing.expectEqualStrings("~/very/", f.prefix);
-    try testing.expectEqualStrings("", f.name);
-    try testing.expect(cellLen(f.prefix) + 1 <= 8);
+test "the path is kept when the whole name fits beside it" {
+    const f = fitParts(label("~/a/", "ztabb", "extra"), 12);
+    try testing.expectEqualStrings("~/a/", f.prefix);
+    try testing.expectEqualStrings("ztabb", f.name);
+    try testing.expect(f.elided); // the trailing context did not fit
 }
 
 test "a name too long for the tab keeps its head" {
@@ -2124,10 +2128,12 @@ test "a name is never made to start with an ellipsis" {
     for (cases) |c| {
         for (1..30) |budget| {
             const f = fitParts(c, @intCast(budget));
-            const first = if (f.prefix.len > 0) f.prefix else f.name;
-            if (first.len == 0) continue;
-            const want = if (c.prefix.len > 0) c.prefix else c.name;
-            try testing.expect(std.mem.startsWith(u8, want, first));
+            // Every part shown starts where that part starts.
+            if (f.prefix.len > 0) try testing.expect(std.mem.startsWith(u8, c.prefix, f.prefix));
+            if (f.name.len > 0) try testing.expect(std.mem.startsWith(u8, c.name, f.name));
+            if (f.suffix.len > 0) try testing.expect(std.mem.startsWith(u8, c.suffix, f.suffix));
+            // And the path is all or nothing, never a fragment.
+            if (f.prefix.len > 0) try testing.expectEqualStrings(c.prefix, f.prefix);
         }
     }
 }
