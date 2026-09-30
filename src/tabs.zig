@@ -547,6 +547,13 @@ pub const Tabs = struct {
     /// Closes one pane of a tab. Returns the pane that takes focus, or null
     /// when the tab has none left.
     pub fn closePane(self: *Tabs, tab_idx: usize, id: u8) ?u8 {
+        // Both arguments index fixed arrays, and neither was checked. Every
+        // caller happens to pass a live tab and a live pane, so nothing has
+        // gone wrong yet -- but the cost of being sure is two comparisons, and
+        // the alternative is reading past the end of an array in a release
+        // build, where nothing stops it.
+        if (tab_idx >= self.count) return null;
+        if (id >= panes.MAX_PANES) return null;
         const tab = &self.items[tab_idx];
         if (tab.slots[id]) |*p| p.close();
         tab.slots[id] = null;
@@ -1221,6 +1228,21 @@ test "no leaks when a tab is opened and closed repeatedly" {
         try tabs.closeTab(tabs.count - 1);
     }
     try testing.expectEqual(@as(usize, 0), tabs.count);
+}
+
+test "closing a pane that is not there changes nothing" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "one", 80, 24);
+    const before = tabs.count;
+
+    // A tab index past the end, and a pane id past the end of a tab's slots.
+    try testing.expectEqual(@as(?u8, null), tabs.closePane(tabs.count, 0));
+    try testing.expectEqual(@as(?u8, null), tabs.closePane(0, panes.MAX_PANES));
+    try testing.expectEqual(@as(?u8, null), tabs.closePane(0, 200));
+
+    try testing.expectEqual(before, tabs.count);
+    try testing.expectEqual(@as(usize, 1), tabs.items[0].paneCount());
 }
 
 test "writeAll delivers a paste far larger than the pipe holds" {
