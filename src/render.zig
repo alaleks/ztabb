@@ -20,7 +20,7 @@ pub const TAB_BAR_CELLS: u32 = 2;
 pub const PAD_X_CELLS: f32 = 0.75;
 pub const PAD_Y_CELLS: f32 = 0.5;
 /// Preferred width of a tab, in character cells.
-pub const TAB_WIDTH_CELLS: u32 = 18;
+pub const TAB_WIDTH_CELLS: u32 = 22;
 /// A tab narrower than this loses its close button; below it there is no room
 /// for a label as well.
 const TAB_MIN_CELLS: u32 = 8;
@@ -750,7 +750,10 @@ pub const Renderer = struct {
             // be read without opening the tab. Only that one: a bar of names
             // all sliding at once is a thing to look away from, and nothing
             // moves unless it is being asked to.
-            if (hover == i and marqueeSpan(tab.labelParts()) > budget) {
+            // Not while it is connecting: the spinner has just taken room, and
+            // a name that slides the moment a tab is opened is the one time
+            // this is unwelcome rather than useful.
+            if (hover == i and !tab.connecting and marqueeSpan(tab.labelParts()) > budget) {
                 _ = self.drawMarquee(tab.labelParts(), label_x, label_y, budget, fg, now_ms);
                 continue;
             }
@@ -857,8 +860,6 @@ pub const Renderer = struct {
     /// Draws a split label: the path dim, the directory bright.
     ///
     /// When the parts do not fit, the trailing context goes first and the
-    /// leading path is elided from the left, because the last component is
-    /// what tells two tabs apart.
     /// Cells a tab's name has to sit in, so the caller can ask the same
     /// question the bar answers when it draws.
     pub fn tabLabelBudget(self: *const Renderer, bar: TabBar) u32 {
@@ -926,23 +927,15 @@ pub const Renderer = struct {
     ) f32 {
         const fitted = fitParts(parts, budget);
         var at = x;
-        var buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
 
-        if (fitted.prefix.len > 0) {
-            const text = if (fitted.elided) blk: {
-                const ell = "\u{2026}";
-                @memcpy(buf[0..ell.len], ell);
-                @memcpy(buf[ell.len..][0..fitted.prefix.len], fitted.prefix);
-                break :blk buf[0 .. ell.len + fitted.prefix.len];
-            } else fitted.prefix;
-            at += self.drawUiText(text, at, y, dim);
-        }
-        at += self.drawUiText(fitted.name, at, y, bright);
-        if (fitted.name_elided) at += self.drawUiText("\u{2026}", at, y, dim);
+        if (fitted.prefix.len > 0) at += self.drawUiText(fitted.prefix, at, y, dim);
+        if (fitted.name.len > 0) at += self.drawUiText(fitted.name, at, y, bright);
         if (fitted.suffix.len > 0) {
             at += self.uiCellW();
             at += self.drawUiText(fitted.suffix, at, y, dim);
         }
+        // After everything, because what was cut is always the end.
+        if (fitted.elided) at += self.drawUiText("\u{2026}", at, y, dim);
         return at;
     }
 
@@ -1421,45 +1414,54 @@ pub const FittedLabel = struct {
     prefix: []const u8 = "",
     name: []const u8 = "",
     suffix: []const u8 = "",
-    /// The prefix was cut from the left and wants an ellipsis in front of it.
+    /// Something was cut off the end, and an ellipsis goes after what is left.
     elided: bool = false,
-    /// The name itself was cut, and wants an ellipsis after it.
-    name_elided: bool = false,
 };
 
-/// Trims a split label down to `budget` cells, giving up the least useful part
-/// first: the trailing context, then the leading path, and only then the name.
+/// Trims a split label to `budget` cells by filling from the start and cutting
+/// whatever will not fit off the end, marked with a single ellipsis.
+///
+/// Only ever from the end. Cutting the leading path instead kept the name
+/// whole, which reads better in isolation and worse in a row of tabs: the text
+/// shifts sideways as the budget changes, and a name that starts with an
+/// ellipsis gives no clue what it is until the tab is opened. A label that
+/// always begins at its beginning can be read down the bar, and the ellipsis
+/// says plainly that there is more.
 pub fn fitParts(parts: tabs_mod.Tab.Label, budget: u32) FittedLabel {
-    var out = FittedLabel{ .prefix = parts.prefix, .name = parts.name, .suffix = parts.suffix };
     if (budget == 0) return .{};
 
-    // The suffix is context; drop it whole rather than cutting into it.
-    if (cellLen(out.prefix) + cellLen(out.name) + cellLen(out.suffix) + 1 > budget) {
-        out.suffix = "";
+    const prefix_cells = cellLen(parts.prefix);
+    const name_cells = cellLen(parts.name);
+    const suffix_cells = cellLen(parts.suffix);
+    // The suffix is set off by a space, which costs a cell of its own.
+    const whole = prefix_cells + name_cells +
+        if (suffix_cells > 0) suffix_cells + 1 else 0;
+    if (whole <= budget) {
+        return .{ .prefix = parts.prefix, .name = parts.name, .suffix = parts.suffix };
     }
-    if (cellLen(out.prefix) + cellLen(out.name) <= budget) return out;
 
-    // Cut the path from the left, keeping the components nearest the name.
-    const name_cells = cellLen(out.name);
-    if (name_cells + 2 <= budget) {
-        const room = budget - name_cells - 1; // one cell for the ellipsis
-        out.prefix = tailCells(out.prefix, room);
-        out.elided = true;
+    // One cell is kept back for the ellipsis that says something was cut --
+    // unless there is only one cell altogether, where a letter of the name
+    // carries more than an ellipsis on its own would.
+    const room = if (budget > 1) budget - 1 else budget;
+    var out = FittedLabel{ .elided = budget > 1 };
+
+    if (prefix_cells >= room) {
+        out.prefix = headCells(parts.prefix, room);
         return out;
     }
+    out.prefix = parts.prefix;
 
-    // Not even the name fits: keep its head. What tells two tabs apart is
-    // nearly always where a name starts -- an ssh profile, a project
-    // directory -- and this kept the tail instead, so `nms_debug_server_21`
-    // showed up as `server_21` with no sign that anything was missing.
-    out.prefix = "";
-    out.elided = false;
-    if (budget >= 2) {
-        out.name = headCells(out.name, budget - 1); // one cell for the ellipsis
-        out.name_elided = true;
-    } else {
-        out.name = headCells(out.name, budget);
+    var left = room - prefix_cells;
+    if (name_cells >= left) {
+        out.name = headCells(parts.name, left);
+        return out;
     }
+    out.name = parts.name;
+    left -= name_cells;
+
+    // The suffix is worth showing only with the space that separates it.
+    if (suffix_cells > 0 and left >= 2) out.suffix = headCells(parts.suffix, left - 1);
     return out;
 }
 
@@ -1640,9 +1642,12 @@ fn testBar(count: usize, width: f32) TabBar {
 
 test "tab bar gives tabs their preferred width when there is room" {
     const bar = testBar(2, 800);
-    try testing.expectEqual(@as(f32, 8 * 18), bar.tabWidth());
+    // Derived rather than written out, so the preferred width can be changed
+    // in one place.
+    const want: f32 = 8 * @as(f32, @floatFromInt(TAB_WIDTH_CELLS));
+    try testing.expectEqual(want, bar.tabWidth());
     try testing.expectEqual(@as(f32, 0), bar.tabX(0));
-    try testing.expectEqual(@as(f32, 144), bar.tabX(1));
+    try testing.expectEqual(want, bar.tabX(1));
 }
 
 test "tabs shrink instead of running off the edge" {
@@ -1666,9 +1671,11 @@ test "the new-tab button stays on screen when tabs overflow" {
 
 test "clicking a tab selects it" {
     const bar = testBar(3, 800);
+    const w = bar.tabWidth();
+    // A point inside each tab, taken from the width rather than assumed.
     try testing.expectEqual(@as(usize, 0), bar.hit(10, 8).tab);
-    try testing.expectEqual(@as(usize, 1), bar.hit(150, 8).tab);
-    try testing.expectEqual(@as(usize, 2), bar.hit(300, 8).tab);
+    try testing.expectEqual(@as(usize, 1), bar.hit(w + 10, 8).tab);
+    try testing.expectEqual(@as(usize, 2), bar.hit(2 * w + 10, 8).tab);
 }
 
 test "clicking the right edge of a tab closes it" {
@@ -2032,25 +2039,37 @@ test "a label that fits is left alone" {
     try testing.expect(!f.elided);
 }
 
-test "the trailing context is the first thing dropped" {
+test "the trailing context is cut, not dropped whole" {
+    // It used to be dropped entire, on the reasoning that half a path is
+    // noise. Cutting it is what "cut the end" means, and the ellipsis says as
+    // much -- an ssh tab showing `prod some\u{2026}` still says more about
+    // where it is than `prod` alone.
     const f = fitParts(label("", "prod", "some/long/remote/dir"), 10);
     try testing.expectEqualStrings("prod", f.name);
-    try testing.expectEqualStrings("", f.suffix);
+    try testing.expectEqualStrings("some", f.suffix);
+    try testing.expect(f.elided);
+    try testing.expect(cellLen(f.name) + 1 + cellLen(f.suffix) + 1 <= 10);
 }
 
-test "the path is cut from the left, keeping what is nearest the name" {
+test "a label is kept from its beginning and cut at its end" {
     const f = fitParts(label("~/a/b/c/", "ztabb", ""), 12);
     try testing.expect(f.elided);
-    try testing.expectEqualStrings("ztabb", f.name);
-    // What survives is the tail of the path, not its head.
-    try testing.expect(std.mem.endsWith(u8, f.prefix, "c/"));
+    // The path survives whole, from its first character, and the cut falls on
+    // what comes after it.
+    try testing.expectEqualStrings("~/a/b/c/", f.prefix);
+    try testing.expectEqualStrings("zta", f.name);
     try testing.expect(cellLen(f.prefix) + cellLen(f.name) + 1 <= 12);
 }
 
-test "the name is never sacrificed while it still fits" {
+test "a prefix that fills the budget on its own is itself cut at the end" {
+    // The consequence of never cutting the front: a deep path in a narrow tab
+    // leaves no room for the directory at the end of it. What is shown still
+    // starts where the label starts, and the ellipsis says there is more.
     const f = fitParts(label("~/very/long/path/", "ztabb", ""), 8);
-    try testing.expectEqualStrings("ztabb", f.name);
-    try testing.expect(cellLen(f.prefix) + cellLen(f.name) + 1 <= 8);
+    try testing.expect(f.elided);
+    try testing.expectEqualStrings("~/very/", f.prefix);
+    try testing.expectEqualStrings("", f.name);
+    try testing.expect(cellLen(f.prefix) + 1 <= 8);
 }
 
 test "a name too long for the tab keeps its head" {
@@ -2058,9 +2077,8 @@ test "a name too long for the tab keeps its head" {
     // differs. That holds for a path and not for a name: two ssh profiles are
     // told apart by how they start, and `nms_debug_server_21` cut to its tail
     // reads as `server_21` with nothing to say it was cut at all.
-    const f = fitParts(label("~/x/", "averylongdirectoryname", ""), 6);
-    try testing.expectEqualStrings("", f.prefix);
-    try testing.expect(f.name_elided);
+    const f = fitParts(label("", "averylongdirectoryname", ""), 6);
+    try testing.expect(f.elided);
     try testing.expectEqual(@as(u32, 5), cellLen(f.name)); // the sixth is the ellipsis
     try testing.expect(std.mem.startsWith(u8, "averylongdirectoryname", f.name));
 }
@@ -2073,8 +2091,45 @@ test "two names that share a tail are still told apart" {
 
 test "a budget of one leaves no room for an ellipsis" {
     const f = fitParts(label("", "averylongname", ""), 1);
-    try testing.expect(!f.name_elided);
+    try testing.expect(!f.elided);
     try testing.expectEqual(@as(u32, 1), cellLen(f.name));
+}
+
+test "a connecting ssh tab keeps the start of its name" {
+    // Reported: opening an ssh tab shifted the text and cut its beginning. An
+    // ssh label is the profile with the remote folder after it, and while the
+    // connection is being made the spinner takes room from it -- so the same
+    // name has to fit a smaller budget, and what it gives up has to be the end.
+    const parts = label("", "nms_debug_server_21", "~/src/app");
+    const settled = fitParts(parts, 24);
+    const connecting = fitParts(parts, 24 - 6); // the spinner's worth, roughly
+
+    for ([_]FittedLabel{ settled, connecting }) |f| {
+        try testing.expectEqualStrings("", f.prefix);
+        try testing.expect(std.mem.startsWith(u8, "nms_debug_server_21", f.name));
+    }
+    // Narrower means less of the name, never a different part of it.
+    try testing.expect(cellLen(connecting.name) <= cellLen(settled.name));
+    try testing.expect(connecting.elided);
+}
+
+test "a name is never made to start with an ellipsis" {
+    // Whatever the budget, what is drawn begins with the label's own first
+    // character: that is what makes a bar of tabs readable down the column.
+    const cases = [_]tabs_mod.Tab.Label{
+        label("", "nms_debug_server_21", "~/src"),
+        label("~/projects/deep/", "app", ""),
+        label("", "Привет-мир-длинное-имя", ""),
+    };
+    for (cases) |c| {
+        for (1..30) |budget| {
+            const f = fitParts(c, @intCast(budget));
+            const first = if (f.prefix.len > 0) f.prefix else f.name;
+            if (first.len == 0) continue;
+            const want = if (c.prefix.len > 0) c.prefix else c.name;
+            try testing.expect(std.mem.startsWith(u8, want, first));
+        }
+    }
 }
 
 test "a label that fits never scrolls" {

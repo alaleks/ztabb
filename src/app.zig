@@ -744,6 +744,9 @@ pub const App = struct {
     fn marqueeRunning(self: *App) bool {
         const i = self.hover_tab orelse return false;
         if (i >= self.tabs.count) return false;
+        // The bar does not scroll a tab that is still connecting, so nothing
+        // here should keep asking for frames on its behalf.
+        if (self.tabs.items[i].connecting) return false;
         return rnd.marqueeSpan(self.tabs.items[i].labelParts()) > self.labelBudget();
     }
 
