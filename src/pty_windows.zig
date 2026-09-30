@@ -463,37 +463,50 @@ pub const Pty = struct {
         return got;
     }
 
+    /// One attempt at handing bytes over, bounded by WRITE_MS. Returns how
+    /// many the child took, which is zero when it is not draining its input.
+    ///
+    /// A caller that must not lose bytes retries, and between tries it has to
+    /// drain this pty's output: a child blocked writing its echo into a pipe
+    /// nobody has emptied has stopped reading, and waiting alone never moves it.
+    pub fn writeSome(self: *Pty, buf: []const u8) error{Closed}!usize {
+        if (buf.len == 0) return 0;
+        const want: DWORD = @intCast(@min(buf.len, IN_PIPE_BYTES));
+        var ov = OVERLAPPED{ .hEvent = self.in_event };
+        _ = ResetEvent(self.in_event);
+
+        var put: DWORD = 0;
+        if (WriteFile(self.in_write, buf.ptr, want, &put, @ptrCast(&ov)).toBool()) {
+            // Room was there: the write finished inside the call, which is what
+            // typing into a healthy child does every time.
+            if (put == 0) return error.Closed;
+            return put;
+        }
+        if (GetLastError() != ERROR_IO_PENDING) return error.Closed;
+
+        if (WaitForSingleObject(self.in_event, WRITE_MS) != WAIT_OBJECT_0) {
+            // Not draining. Take the write back rather than hold up the caller,
+            // and report whatever got through before we gave up.
+            _ = CancelIoEx(self.in_write, &ov);
+            var cancelled: DWORD = 0;
+            _ = GetOverlappedResult(self.in_write, &ov, &cancelled, .TRUE);
+            return cancelled;
+        }
+
+        var done: DWORD = 0;
+        if (!GetOverlappedResult(self.in_write, &ov, &done, .FALSE).toBool()) return error.Closed;
+        if (done == 0) return error.Closed;
+        return done;
+    }
+
+    /// Writes the whole slice, dropping what the child will not take. Right for
+    /// a keystroke; `Tabs.writeAll` is the path that does not lose a paste.
     pub fn write(self: *Pty, buf: []const u8) error{Closed}!void {
         var off: usize = 0;
         while (off < buf.len) {
-            const want: DWORD = @intCast(@min(buf.len - off, IN_PIPE_BYTES));
-            var ov = OVERLAPPED{ .hEvent = self.in_event };
-            _ = ResetEvent(self.in_event);
-
-            var put: DWORD = 0;
-            if (WriteFile(self.in_write, buf[off..].ptr, want, &put, @ptrCast(&ov)).toBool()) {
-                // Room was there: the write finished inside the call, which is
-                // what typing into a healthy child does every time.
-                if (put == 0) return error.Closed;
-                off += put;
-                continue;
-            }
-            if (GetLastError() != ERROR_IO_PENDING) return error.Closed;
-
-            if (WaitForSingleObject(self.in_event, WRITE_MS) != WAIT_OBJECT_0) {
-                // The child is not draining its input. Take the write back and
-                // drop what is left, rather than hold up the caller: the same
-                // bargain the POSIX side makes.
-                _ = CancelIoEx(self.in_write, &ov);
-                var cancelled: DWORD = 0;
-                _ = GetOverlappedResult(self.in_write, &ov, &cancelled, .TRUE);
-                return;
-            }
-
-            var done: DWORD = 0;
-            if (!GetOverlappedResult(self.in_write, &ov, &done, .FALSE).toBool()) return error.Closed;
-            if (done == 0) return error.Closed;
-            off += done;
+            const n = try self.writeSome(buf[off..]);
+            if (n == 0) return;
+            off += n;
         }
     }
 

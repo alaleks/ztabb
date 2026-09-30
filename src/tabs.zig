@@ -363,6 +363,17 @@ pub const Tabs = struct {
     ///
     /// Eight milliseconds leaves half of a sixty-hertz frame to draw in.
     pub const PUMP_MS: i64 = 8;
+    /// How long a paste may spend getting through before the rest is given up.
+    ///
+    /// Only a child that has stopped reading ever pays it: one that reads takes
+    /// the whole thing on the first pass. A second of a held frame is bad, a
+    /// paste cut in half is worse, and the caller is told which happened.
+    const WRITE_ALL_MS: i64 = 1000;
+    /// How much of a paste is offered before pausing to let the child catch up.
+    /// A tty's input queue is roughly a kilobyte, and it is never asked.
+    const WRITE_CHUNK: usize = 1024;
+    /// How far ahead of the child's echo the writer may run.
+    const WRITE_AHEAD: usize = 2 * 1024;
 
     /// Milliseconds from some fixed point, spelled for the platform. Only
     /// differences are ever taken, so the origin does not matter.
@@ -387,6 +398,65 @@ pub const Tabs = struct {
     ///
     /// One read per pane per pass, going round until everything is quiet or
     /// the budget runs out, so a chatty pane cannot starve the rest.
+    /// Writes everything to the focused pane, pacing itself against the
+    /// child's echo, and returns how many bytes got through.
+    ///
+    /// `Pty.write` drops what a stalled child will not take, which is the right
+    /// bargain for a keystroke and the wrong one for a paste. Two separate
+    /// things go wrong with a paste large enough to matter, and both need this:
+    ///
+    ///   - The child echoes it into the pipe this end has not emptied, fills
+    ///     it, and blocks on its own write -- and a child blocked writing has
+    ///     stopped reading. No amount of waiting clears that; reading does.
+    ///   - A tty whose input queue is full discards what will not fit and
+    ///     reports the write as having succeeded. Measured on macOS: four
+    ///     megabytes handed to a pty master whose child never reads are all
+    ///     accepted and most are lost. Nothing can be asked about the queue,
+    ///     so the only defence is not to outrun the reader.
+    ///
+    /// Hence a chunk at a time, with one read of the child's own output between
+    /// chunks: that empties the pipe it may be stuck on, and its echo is the
+    /// evidence it has been reading. Bounded, so a child that never reads
+    /// cannot hold the frame, and the count comes back so the caller can say
+    /// the paste was cut short rather than leaving it to be found in the text.
+    pub fn writeAll(self: *Tabs, bytes: []const u8) usize {
+        const tab = self.active() orelse return 0;
+        const deadline = clock.ms() + WRITE_ALL_MS;
+        var buf: [16 * 1024]u8 = undefined;
+        var off: usize = 0;
+        var echoed: usize = 0;
+        while (off < bytes.len) {
+            const p = tab.active();
+
+            // Stay behind the echo. A child that echoes has to have read a byte
+            // before it can send it back, so what has come back is the one
+            // measure of what it has taken -- and the only one, since a tty is
+            // never asked how much room its input queue has left. A child that
+            // echoes nothing at all cannot be paced this way, so once nothing
+            // has come back the limit lifts rather than starving it.
+            const ahead = echoed == 0 or off < echoed + WRITE_AHEAD;
+            if (ahead) {
+                const take = @min(bytes.len - off, WRITE_CHUNK);
+                const n = p.pty.writeSome(bytes[off..][0..take]) catch break;
+                off += n;
+                if (off == bytes.len) break;
+            }
+            if (clock.ms() >= deadline) break;
+
+            // One read rather than a full pump: the point is to free the pipe
+            // the child may be stuck writing into, and a pump bounded by its
+            // own budget would spend that budget on every chunk.
+            const got = p.pty.read(&buf) catch 0;
+            if (got > 0) {
+                p.terminal.write(buf[0..got]);
+                echoed += got;
+            } else {
+                _ = p.pty.waitReadable(1);
+            }
+        }
+        return off;
+    }
+
     pub fn pumpAll(self: *Tabs) bool {
         var buf: [64 * 1024]u8 = undefined;
         var any = false;
@@ -1151,4 +1221,95 @@ test "no leaks when a tab is opened and closed repeatedly" {
         try tabs.closeTab(tabs.count - 1);
     }
     try testing.expectEqual(@as(usize, 0), tabs.count);
+}
+
+test "writeAll delivers a paste far larger than the pipe holds" {
+    // `Pty.write` gives up on a child that stops taking input, which is what a
+    // paste this size makes it do: the child echoes it back into a pipe this
+    // end has not emptied, fills it, blocks on its own write -- and a child
+    // blocked writing has stopped reading. Pasting a long command used to
+    // arrive cut off somewhere in the middle, with nothing said about it.
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "big", 80, 24);
+
+    const payload = try testing.allocator.alloc(u8, 128 * 1024);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'x');
+    // Newlines throughout, so the child has something to echo as it goes
+    // rather than one line longer than any buffer.
+    var at: usize = 0;
+    while (at < payload.len) : (at += 64) payload[at] = '\n';
+
+    // What is asserted is what this function controls: none of it was given up
+    // on. Whether every byte then survives the kernel is not ours to promise --
+    // a tty discards what its input queue has no room for and reports the write
+    // as having succeeded -- which is why the end-to-end check below stays
+    // within a size a paced writer keeps ahead of.
+    try testing.expectEqual(payload.len, tabs.writeAll(payload));
+}
+
+test "a paste past the drop threshold reaches the child whole" {
+    // Eight kilobytes is far past the point where `Pty.write` starts dropping.
+    //
+    // What comes back cannot be matched as text: the tty echoes each byte as it
+    // is written while the child writes its own copy, and the two streams
+    // interleave, so a marker arrives in pieces with the other stream's bytes
+    // between them. Interleaving loses nothing though, so the bytes are what to
+    // count -- and the tab is given enough history to hold them all rather than
+    // letting the earliest scroll away unseen.
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    var p = try pty.Pty.spawn(echoCommand(), &.{}, 80, 24);
+    errdefer p.close();
+    const t = try term.Terminal.init(testing.allocator, 80, 24, 4096);
+    tabs.items[0] = .{
+        .slots = @splat(null),
+        .tree = panes.Tree.single(),
+        .focused = 0,
+        .kind = .shell,
+        .label = [_]u8{0} ** MAX_LABEL,
+        .label_len = 0,
+    };
+    tabs.items[0].slots[0] = .{ .pty = p, .terminal = t };
+    tabs.items[0].setLabel("paste");
+    tabs.count = 1;
+    tabs.active_idx = 0;
+
+    var payload: [8 * 1024]u8 = undefined;
+    @memset(&payload, 'x');
+    var at: usize = 0;
+    var newlines: usize = 0;
+    while (at < payload.len) : (at += 64) {
+        payload[at] = '\n';
+        newlines += 1;
+    }
+
+    try testing.expectEqual(payload.len, tabs.writeAll(&payload));
+
+    // Drain until the child goes quiet, then count what arrived.
+    const term_ptr = tabs.items[0].terminalOf();
+    var quiet: usize = 0;
+    for (0..600) |_| {
+        if (tabs.pumpAll()) {
+            quiet = 0;
+            continue;
+        }
+        quiet += 1;
+        if (quiet >= 20) break;
+        sleepMs(5);
+    }
+
+    var seen: usize = 0;
+    var row: u32 = 0;
+    while (row < term_ptr.absRows()) : (row += 1) {
+        for (term_ptr.srcRow(row)) |c| {
+            if (c.ch == 'x') seen += 1;
+        }
+    }
+
+    // One whole copy of the payload's payload, at least: the child's and the
+    // tty's are both on their way, and whichever lags, nothing was dropped.
+    const sent_xs = payload.len - newlines;
+    try testing.expect(seen >= sent_xs);
 }

@@ -902,13 +902,22 @@ pub const App = struct {
         // markers: that is how a shell tells pasted text from typing, and why
         // pasting a command does not run it until Enter.
         const bracketed = tab.active().terminal.bracketed_paste;
-        if (bracketed) tab.active().pty.write("\x1b[200~") catch {};
+
+        // Through `writeAll`, not `pty.write`: a paste large enough to fill the
+        // pipe is exactly what `write` gives up on, and a paste that arrives
+        // half-typed is worse than one that does not arrive. `writeAll` drains
+        // the child's echo between attempts, which is what unsticks it.
+        var wanted: usize = 0;
+        var sent: usize = 0;
+
+        if (bracketed) _ = self.tabs.writeAll("\x1b[200~");
 
         var buf: [4096]u8 = undefined;
         var n: usize = 0;
         for (text) |c| {
             if (n == buf.len) {
-                tab.active().pty.write(buf[0..n]) catch {};
+                wanted += n;
+                sent += self.tabs.writeAll(buf[0..n]);
                 n = 0;
             }
             // A newline is Return on the wire. Inside the markers the program
@@ -917,9 +926,17 @@ pub const App = struct {
             buf[n] = if (c == '\n') '\r' else c;
             n += 1;
         }
-        tab.active().pty.write(buf[0..n]) catch {};
+        wanted += n;
+        sent += self.tabs.writeAll(buf[0..n]);
 
-        if (bracketed) tab.active().pty.write("\x1b[201~") catch {};
+        if (bracketed) _ = self.tabs.writeAll("\x1b[201~");
+
+        // Cut short only by a child that stopped reading for a whole second.
+        // Said plainly, because the alternative is the user finding half a
+        // command on the line and no reason for it.
+        if (sent < wanted) {
+            self.showToast("paste cut short: {d} of {d} bytes", .{ sent, wanted });
+        }
     }
 
     /// Copies the selection.

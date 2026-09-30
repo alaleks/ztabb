@@ -379,6 +379,31 @@ test "a second close does not reach a pty opened since the first" {
     try testing.expect(awaitText(&second, "alive"));
 }
 
+test "writeSome reports what it took and never waits for room" {
+    var pty = try Pty.spawn(sleepArgv(), &.{}, 80, 24);
+    defer pty.close();
+
+    // This child never reads its input. What the two platforms then do differs,
+    // and neither may hang: a pty master on macOS accepts the bytes and the
+    // line discipline discards what will not fit, while ConPTY's pipe fills and
+    // the write is taken back once WRITE_MS is up. Either way the call has to
+    // return, promptly and with a count -- a caller that must not lose bytes
+    // retries and drains between tries, which it can only do if this comes back.
+    var junk = [_]u8{'x'} ** (64 * 1024);
+    var total: usize = 0;
+    step("offer more than the pipe holds, repeatedly");
+    for (0..64) |_| {
+        const n = pty.writeSome(&junk) catch break;
+        try testing.expect(n <= junk.len);
+        total += n;
+    }
+    step("writeSome returned every time");
+
+    // Something went, and this test reaching its end is the proof that no
+    // attempt waited for a reader that was never going to arrive.
+    try testing.expect(total > 0);
+}
+
 test "closing a pty twice is harmless" {
     step("spawn");
     var pty = try Pty.spawn(catArgv(), &.{}, 80, 24);

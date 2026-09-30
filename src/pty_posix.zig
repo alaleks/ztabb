@@ -165,27 +165,47 @@ pub const Pty = struct {
         };
     }
 
-    /// Writes the whole slice, retrying on short writes and on a full tty
-    /// buffer. Bytes that cannot be delivered are dropped rather than blocking
-    /// the UI, which matches what a real terminal does when the reader stalls.
+    /// One attempt at handing bytes over, with no waiting at all. Returns how
+    /// many the child's end took, which is zero when its buffer is full.
+    ///
+    /// The master is non-blocking, so this is the whole story: a caller that
+    /// must not lose bytes retries, and between tries it has to drain this
+    /// pty's output -- a child blocked writing its echo into a pipe nobody has
+    /// emptied has stopped reading, and no amount of waiting alone will move it.
+    pub fn writeSome(self: *Pty, buf: []const u8) error{Closed}!usize {
+        if (buf.len == 0) return 0;
+        while (true) {
+            const n = libc.write(self.master, buf.ptr, buf.len);
+            if (n < 0) {
+                const e = errno();
+                if (e == .INTR) continue;
+                if (e == .AGAIN) return 0;
+                return error.Closed;
+            }
+            if (n == 0) return error.Closed;
+            return @intCast(n);
+        }
+    }
+
+    /// Writes the whole slice, retrying briefly on a full tty buffer. Bytes
+    /// that still cannot be delivered are dropped rather than blocking the UI,
+    /// which matches what a real terminal does when the reader stalls.
+    ///
+    /// Right for a keystroke, which is a few bytes and worth nothing if it
+    /// arrives late. Not right for a paste: `Tabs.writeAll` delivers those.
     pub fn write(self: *Pty, buf: []const u8) error{Closed}!void {
         var off: usize = 0;
         var stalls: u8 = 0;
         while (off < buf.len) {
-            const n = libc.write(self.master, buf[off..].ptr, buf.len - off);
-            if (n < 0) {
-                const e = errno();
-                if (e == .INTR) continue;
-                if (e == .AGAIN) {
-                    stalls += 1;
-                    if (stalls > 16) return;
-                    _ = libc.usleep(1000);
-                    continue;
-                }
-                return error.Closed;
+            const n = try self.writeSome(buf[off..]);
+            if (n == 0) {
+                stalls += 1;
+                if (stalls > 16) return;
+                _ = libc.usleep(1000);
+                continue;
             }
-            if (n == 0) return error.Closed;
-            off += @intCast(n);
+            stalls = 0;
+            off += n;
         }
     }
 
