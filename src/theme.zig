@@ -50,18 +50,18 @@ pub const dark = Theme{
     .kind = .dark,
     .name = "gerry dark",
 
-    .bg = 0x2B2E36,
+    .bg = 0x1E2128,
     .fg = 0xCBD1DB,
     .cursor = 0xD8DDE5,
-    .cursor_text = 0x2B2E36,
+    .cursor_text = 0x1E2128,
     .selection = 0x425170,
 
-    .tab_bar_bg = 0x22252C,
-    .tab_active_bg = 0x333740,
-    .tab_inactive_bg = 0x272B32,
+    .tab_bar_bg = 0x15181E,
+    .tab_active_bg = 0x262A32,
+    .tab_inactive_bg = 0x1A1E24,
     .tab_active_fg = 0xE3E7ED,
     .tab_inactive_fg = 0x8992A0,
-    .tab_border = 0x1C1F24,
+    .tab_border = 0x0F1216,
 
     .ansi = .{
         0x333740, 0xE06C77, 0x8FBF7F, 0xD9B072,
@@ -250,6 +250,24 @@ test "the active tab gradient is visible but not garish" {
         try std.testing.expect(contrastRatio(top, t.tab_inactive_bg) > 1.05);
         // ...while the label stays readable across the whole sweep.
         try std.testing.expect(contrastRatio(t.tab_active_fg, top) >= 4.0);
+    }
+}
+
+test "the chrome recedes behind the ground and the focused tab does not" {
+    // The bar sits behind the terminal and the focused tab level with it or in
+    // front. Darkening the ground without moving the rest inverts that, and the
+    // bar then reads as floating above the screen instead of under it -- which
+    // is the thing to catch, since these values are only ever changed by hand.
+    for ([_]*const Theme{ &dark, &light }) |t| {
+        // The divider is the furthest back of all.
+        try std.testing.expect(luminance(t.tab_border) < luminance(t.tab_bar_bg));
+        try std.testing.expect(luminance(t.tab_border) < luminance(t.tab_inactive_bg));
+        // The bar and the tabs waiting in it are behind the ground.
+        try std.testing.expect(luminance(t.tab_bar_bg) < luminance(t.bg));
+        try std.testing.expect(luminance(t.tab_inactive_bg) < luminance(t.bg));
+        // The focused one is not. Level with the ground is allowed: that is how
+        // the light theme joins the tab to the screen below it.
+        try std.testing.expect(luminance(t.tab_active_bg) >= luminance(t.bg));
     }
 }
 
