@@ -574,6 +574,8 @@ pub const App = struct {
             return;
         }
 
+        self.traceMouse("down", y);
+
         if (ev.button == sdl.BUTTON_RIGHT) {
             // The right button opens the menu over the terminal only; the tab
             // bar and the title belong to the window.
@@ -615,6 +617,7 @@ pub const App = struct {
             self.dragging = true;
             self.drag_y = y;
             self.ui_dirty = true;
+            self.traceMouse("selection started", y);
             return;
         }
 
@@ -649,6 +652,41 @@ pub const App = struct {
         if (y < chrome_h) return false; // the title strip and the tab bar
         if (shift) return false; // asked for ztabb's selection instead
         return wants_mouse;
+    }
+
+    /// Prints what the mouse did and where it went, when `ZTABB_TRACE` is set.
+    ///
+    /// Where a mouse event goes is decided from things that leave no trace on
+    /// screen -- whether Shift was down when the button went down, what the
+    /// program asked for, whether a selection was started -- and the symptom of
+    /// any of them being wrong is the same: dragging simply does nothing.
+    /// Printed, they say which one it was.
+    fn traceMouse(self: *App, what: []const u8, y: f32) void {
+        const gate = struct {
+            var on: ?bool = null;
+        };
+        if (gate.on == null) gate.on = std.c.getenv("ZTABB_TRACE") != null;
+        if (!gate.on.?) return;
+
+        const tab = self.tabs.active() orelse return;
+        const t = &tab.active().terminal;
+        const m = t.mouse;
+        std.debug.print(
+            "ZTRACE mouse {s}: shift={} to_program={} " ++
+                "modes[1000={} 1002={} 1003={} sgr={}] alt={} dragging={} selection={}\n",
+            .{
+                what,
+                shiftHeld(),
+                self.mouseIsProgrammes(y),
+                m.buttons,
+                m.drag,
+                m.any_motion,
+                m.sgr,
+                t.onAltScreen(),
+                self.dragging,
+                self.selection != null,
+            },
+        );
     }
 
     /// Whether the pointer at `y` belongs to the program in the terminal
@@ -712,6 +750,7 @@ pub const App = struct {
     }
 
     fn onMouseUp(self: *App, ev: sdl.MouseButtonEvent) void {
+        self.traceMouse("up", ev.y * self.density);
         self.dragging = false;
         self.swallowed_press = null;
         self.last_motion_cell = null;
