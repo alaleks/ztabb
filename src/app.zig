@@ -417,7 +417,11 @@ pub const App = struct {
         }
 
         if (shortcutFor(key, mods)) |action| {
-            self.run_action(action);
+            // Auto-repeat is for typing, not for commands. Held a moment too
+            // long, Cmd+C used to run twice -- and the second run reported on
+            // a selection the first had already taken -- while Cmd+W would
+            // have gone on closing panes.
+            if (!ev.repeat) self.run_action(action);
             self.text_gate.claim();
             return;
         }
@@ -428,7 +432,7 @@ pub const App = struct {
         // not. In a terminal Ctrl+C is the interrupt and cannot simply become
         // copy, but with a selection on screen that is plainly what was meant
         // -- and with none, nothing is taken away.
-        if (mods & sdl.KMOD_CTRL != 0 and !isAppMod(mods) and key == sdl.SDLK_C) {
+        if (!ev.repeat and mods & sdl.KMOD_CTRL != 0 and !isAppMod(mods) and key == sdl.SDLK_C) {
             if (self.selection) |sel| {
                 if (!sel.isEmpty()) {
                     self.copy();
@@ -662,11 +666,7 @@ pub const App = struct {
     /// any of them being wrong is the same: dragging simply does nothing.
     /// Printed, they say which one it was.
     fn traceMouse(self: *App, what: []const u8, y: f32) void {
-        const gate = struct {
-            var on: ?bool = null;
-        };
-        if (gate.on == null) gate.on = std.c.getenv("ZTABB_TRACE") != null;
-        if (!gate.on.?) return;
+        if (!traceOn()) return;
 
         const tab = self.tabs.active() orelse return;
         const t = &tab.active().terminal;
@@ -687,6 +687,15 @@ pub const App = struct {
                 self.selection != null,
             },
         );
+    }
+
+    /// Whether `ZTABB_TRACE` was set. Read once.
+    fn traceOn() bool {
+        const gate = struct {
+            var on: ?bool = null;
+        };
+        if (gate.on == null) gate.on = std.c.getenv("ZTABB_TRACE") != null;
+        return gate.on.?;
     }
 
     /// Whether the pointer at `y` belongs to the program in the terminal
@@ -1085,9 +1094,23 @@ pub const App = struct {
     fn copy(self: *App) void {
         const tab = self.tabs.active() orelse return;
         const sel = self.selection orelse {
+            if (traceOn()) std.debug.print("ZTRACE copy: no selection at all\n", .{});
             self.showToast("nothing selected", .{});
             return;
         };
+        if (traceOn()) {
+            std.debug.print(
+                "ZTRACE copy: active={} anchor={d},{d} head={d},{d} abs_rows={d}\n",
+                .{
+                    sel.active,
+                    sel.anchor_row,
+                    sel.anchor_col,
+                    sel.head_row,
+                    sel.head_col,
+                    tab.active().terminal.absRows(),
+                },
+            );
+        }
         if (sel.isEmpty()) {
             self.showToast("nothing selected", .{});
             return;
@@ -1097,6 +1120,7 @@ pub const App = struct {
         const text = term.selectedText(&tab.active().terminal, sel, buf[0 .. buf.len - 1]);
         buf[text.len] = 0;
         sdl.setClipboardText(@ptrCast(&buf));
+        if (traceOn()) std.debug.print("ZTRACE copy: took {d} bytes\n", .{text.len});
         self.showToast("copied {d} chars", .{text.len});
     }
 

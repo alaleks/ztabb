@@ -3155,3 +3155,36 @@ test "a motion report carries the motion bit and the button held" {
     var buf: [32]u8 = undefined;
     try testing.expectEqualStrings("\x1b[<35;4;2M", m.encode(&buf, MouseMode.motionCode(null), 3, 1, true));
 }
+
+test "text is selectable on the alternate screen" {
+    // Where a full-screen program lives: an editor, a pager, a coding agent.
+    // Nothing covered it, and it is the one case where the rows a selection
+    // names are not the rows history holds -- entering the alternate screen
+    // leaves the main screen's scrollback in place while the screen itself is
+    // replaced, so `srcRow` has to answer from the live screen for every row a
+    // click can reach.
+    var t = try testTerm(8, 3);
+    defer t.deinit();
+
+    // Give the main screen some history first, so `sb_len` is not zero and the
+    // absolute rows a selection is held in do not start at the screen.
+    for (0..6) |i| {
+        var buf: [8]u8 = undefined;
+        t.write(std.fmt.bufPrint(&buf, "old{d}\r\n", .{i}) catch unreachable);
+    }
+    try testing.expect(t.sb_len > 0);
+
+    t.write("\x1b[?1049h"); // into the alternate screen
+    t.write("\x1b[H\x1b[2Jhello\r\nworld");
+
+    // What a click on the first visible row produces.
+    const sel = Selection{
+        .anchor_row = t.absRow(0),
+        .anchor_col = 0,
+        .head_row = t.absRow(1),
+        .head_col = 5,
+        .active = true,
+    };
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("hello\nworld", selectedText(&t, sel, &buf));
+}
