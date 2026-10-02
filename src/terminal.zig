@@ -1465,6 +1465,23 @@ pub const MouseMode = struct {
         return self.buttons or self.drag or self.any_motion;
     }
 
+    /// Whether the program wants to hear about the pointer moving.
+    ///
+    /// 1000 asks only for presses and releases; 1002 adds movement while a
+    /// button is down; 1003 adds all of it. Asked separately from `wants`
+    /// because a program on 1000 alone must not be sent a report for every
+    /// cell the pointer crosses.
+    pub fn wantsMotion(self: MouseMode, button_held: bool) bool {
+        if (self.any_motion) return true;
+        return self.drag and button_held;
+    }
+
+    /// The button code for a motion report: the protocol's motion bit added to
+    /// the button being held, or to the same 3 a release uses when none is.
+    pub fn motionCode(held: ?u8) u8 {
+        return 32 + (held orelse 3);
+    }
+
     /// Encodes one event for the program.
     ///
     /// `button` is the code the protocol uses: 0-2 for the buttons, 64 and 65
@@ -3108,4 +3125,33 @@ test "resizing on the alternate screen does not leave the ring turned" {
     var line: [8]u8 = undefined;
     try testing.expectEqualStrings("top", rowText(&t, 0, &line));
     try testing.expectEqualStrings("bot", rowText(&t, 1, &line));
+}
+
+test "only a program that asked for motion is told about it" {
+    const buttons_only = MouseMode{ .buttons = true };
+    try testing.expect(!buttons_only.wantsMotion(false));
+    try testing.expect(!buttons_only.wantsMotion(true));
+
+    // 1002: while a button is down, and only then.
+    const on_drag = MouseMode{ .buttons = true, .drag = true };
+    try testing.expect(!on_drag.wantsMotion(false));
+    try testing.expect(on_drag.wantsMotion(true));
+
+    // 1003: always.
+    const always = MouseMode{ .buttons = true, .drag = true, .any_motion = true };
+    try testing.expect(always.wantsMotion(false));
+    try testing.expect(always.wantsMotion(true));
+}
+
+test "a motion report carries the motion bit and the button held" {
+    try testing.expectEqual(@as(u8, 32), MouseMode.motionCode(0)); // left held
+    try testing.expectEqual(@as(u8, 33), MouseMode.motionCode(1));
+    try testing.expectEqual(@as(u8, 34), MouseMode.motionCode(2));
+    // Nothing held: the same button field a release uses, plus the bit.
+    try testing.expectEqual(@as(u8, 35), MouseMode.motionCode(null));
+
+    // And it encodes as a press, since motion has no release of its own.
+    const m = MouseMode{ .any_motion = true, .sgr = true };
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("\x1b[<35;4;2M", m.encode(&buf, MouseMode.motionCode(null), 3, 1, true));
 }

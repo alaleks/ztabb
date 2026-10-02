@@ -180,11 +180,17 @@ mouse back for selection while such a program has it.
 right or down, close it. Items that would do nothing — copy with no selection —
 are dimmed rather than hidden, so the menu keeps its shape.
 
-Clicking a pane focuses it. Mouse: **+** opens a tab, the globe beside it drops down the SSH hosts, a click
-selects a tab, **×** closes one. Dragging over the terminal selects a range;
-`Cmd+C` copies it, falling back to the cursor's line when nothing is selected.
-Typing or switching tabs clears the selection, so what is highlighted is always
-what would be copied.
+In the bar, **+** opens a tab, the globe beside it drops down the SSH hosts, a
+click selects a tab and **×** closes one. Over the terminal, a click focuses the
+pane it lands in and dragging selects a range for `Cmd+C`. Typing or switching
+tabs clears the selection, so what is highlighted is always what would be
+copied.
+
+While a program holds the mouse, a drag goes to it and selects nothing — so the
+first time one is swallowed, ztabb says once that **Shift** is what takes the
+mouse back. Without that there is no way to copy anything off the screen while
+such a program is running, which is most of the time with an editor or a coding
+agent in the pane.
 
 Pasting honours **bracketed paste**: when the program has asked for it, the text
 arrives wrapped in markers, so a shell can tell it from typing and will not run

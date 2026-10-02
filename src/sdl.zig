@@ -123,6 +123,11 @@ pub const KMOD_GUI: u16 = KMOD_LGUI | KMOD_RGUI;
 pub const BUTTON_LEFT: u8 = 1;
 pub const BUTTON_MIDDLE: u8 = 2;
 pub const BUTTON_RIGHT: u8 = 3;
+/// What a motion event's `state` carries: one bit per button, counted from the
+/// button numbers above so the two cannot drift apart.
+pub const BUTTON_LMASK: u32 = @as(u32, 1) << (BUTTON_LEFT - 1);
+pub const BUTTON_MMASK: u32 = @as(u32, 1) << (BUTTON_MIDDLE - 1);
+pub const BUTTON_RMASK: u32 = @as(u32, 1) << (BUTTON_RIGHT - 1);
 
 pub const PIXELFORMAT_ARGB8888: u32 = 0x16362004;
 pub const TEXTUREACCESS_STATIC: u32 = 0;

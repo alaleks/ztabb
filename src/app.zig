@@ -88,6 +88,14 @@ pub const App = struct {
     /// The range the mouse is drawing, or has drawn, over the terminal.
     selection: ?term.Selection = null,
     dragging: bool = false,
+    /// The cell the program was last told the pointer was in, so motion is
+    /// reported once per cell crossed rather than once per pixel moved.
+    last_motion_cell: ?struct { col: u32, row: u32 } = null,
+    /// Where a press went to the program instead of starting a selection. A
+    /// drag that follows one is almost always someone trying to select.
+    swallowed_press: ?struct { x: f32, y: f32 } = null,
+    /// How to select while a program holds the mouse is worth saying once.
+    hinted_shift_select: bool = false,
     /// Where the pointer was last seen, so a drag held beyond the edge of the
     /// grid keeps scrolling while it is not moving.
     drag_y: f32 = 0,
@@ -574,11 +582,11 @@ pub const App = struct {
             self.ui_dirty = true;
             return;
         }
-        // A program that asked for the mouse gets the click, unless Shift is
-        // held -- the long-standing way to reach the terminal's own selection
-        // while something like vim has the mouse.
-        if (y >= self.chromeH() and !shiftHeld()) {
-            if (self.reportMouse(ev.button - 1, x, y, true)) return;
+        if (self.mouseIsProgrammes(y)) {
+            if (self.reportMouse(ev.button - 1, x, y, true)) {
+                if (ev.button == sdl.BUTTON_LEFT) self.swallowed_press = .{ .x = x, .y = y };
+                return;
+            }
         }
         if (ev.button != sdl.BUTTON_LEFT) return;
 
@@ -627,6 +635,68 @@ pub const App = struct {
         return sdl.modState() & sdl.KMOD_SHIFT != 0;
     }
 
+    /// Whether a mouse event is the program's to handle rather than ztabb's.
+    ///
+    /// Shift is the way back to the terminal's own selection while something
+    /// holds the mouse -- vim, htop, a coding agent in a pane. Without it
+    /// there is no way to copy anything off the screen while such a program is
+    /// running, since every press and drag goes straight to it. It is also why
+    /// no keyboard binding uses Shift.
+    ///
+    /// Kept apart from the event handlers so the rule can be checked: this is
+    /// a decision about where input goes, and getting it wrong is silent.
+    fn mouseGoesToProgram(y: f32, chrome_h: f32, wants_mouse: bool, shift: bool) bool {
+        if (y < chrome_h) return false; // the title strip and the tab bar
+        if (shift) return false; // asked for ztabb's selection instead
+        return wants_mouse;
+    }
+
+    /// Whether the pointer at `y` belongs to the program in the terminal
+    /// rather than to ztabb.
+    fn mouseIsProgrammes(self: *App, y: f32) bool {
+        const tab = self.tabs.active() orelse return false;
+        const wants = tab.active().terminal.mouse.wants();
+        return mouseGoesToProgram(y, self.chromeH(), wants, shiftHeld());
+    }
+
+    /// Which button a motion event says is held, in the protocol's numbering.
+    /// The lowest one, when several are: a report carries only one.
+    fn heldButton(state: u32) ?u8 {
+        if (state & sdl.BUTTON_LMASK != 0) return 0;
+        if (state & sdl.BUTTON_MMASK != 0) return 1;
+        if (state & sdl.BUTTON_RMASK != 0) return 2;
+        return null;
+    }
+
+    /// Sends the pointer's new position to the program, if it asked to hear
+    /// about movement.
+    ///
+    /// Once per cell, not once per pixel: the protocol counts in cells, and a
+    /// report for every pixel of a quick drag across a window would be
+    /// thousands of them down a pipe the program is trying to read.
+    fn reportMotion(self: *App, state: u32, x: f32, y: f32) void {
+        const tab = self.tabs.active() orelse return;
+        const p = tab.active();
+        const held = heldButton(state);
+        if (!p.terminal.mouse.wantsMotion(held != null)) return;
+
+        const at = self.renderer.cellAt(&p.terminal, self.chromeH(), x, y);
+        if (self.last_motion_cell) |last| {
+            if (last.col == at.col and last.row == at.row) return;
+        }
+        self.last_motion_cell = .{ .col = at.col, .row = at.row };
+
+        var buf: [32]u8 = undefined;
+        const report = p.terminal.mouse.encode(
+            &buf,
+            term.MouseMode.motionCode(held),
+            at.col,
+            at.row,
+            true,
+        );
+        if (report.len > 0) p.pty.write(report) catch {};
+    }
+
     /// Sends a mouse event to the program, if it asked for them.
     /// Returns true when the event was its business rather than ours.
     fn reportMouse(self: *App, button: u8, x: f32, y: f32, pressed: bool) bool {
@@ -643,12 +713,14 @@ pub const App = struct {
 
     fn onMouseUp(self: *App, ev: sdl.MouseButtonEvent) void {
         self.dragging = false;
+        self.swallowed_press = null;
+        self.last_motion_cell = null;
         // A modal swallowed the press; the program must not be handed the
         // release on its own, which it would read as a click it never saw begin.
         if (self.picker != null or self.menu != null) return;
         const scale: f32 = self.density;
         const y = ev.y * scale;
-        if (y >= self.chromeH() and !shiftHeld()) {
+        if (self.mouseIsProgrammes(y)) {
             _ = self.reportMouse(ev.button - 1, ev.x * scale, y, false);
         }
     }
@@ -706,6 +778,29 @@ pub const App = struct {
         }
         const hover_scale: f32 = self.density;
         self.noteHover(ev.x * hover_scale, ev.y * hover_scale);
+
+        const mx = ev.x * hover_scale;
+        const my = ev.y * hover_scale;
+
+        // Dragging after a press the program took is someone trying to select
+        // text, not to work the program. Say how, the first time only.
+        if (self.swallowed_press) |from| {
+            const cw: f32 = @floatFromInt(self.renderer.cellW());
+            if (@abs(mx - from.x) > cw * 2 or @abs(my - from.y) > cw * 2) {
+                if (!self.hinted_shift_select) {
+                    self.hinted_shift_select = true;
+                    self.showToast("hold Shift to select while a program has the mouse", .{});
+                }
+                self.swallowed_press = null;
+            }
+        }
+
+        // Movement belongs to the program when it asked for it -- unless Shift
+        // is held, or a selection of ours is being dragged, in which case the
+        // press that began it was never the program's.
+        if (!self.dragging and self.mouseIsProgrammes(my)) {
+            self.reportMotion(ev.state, mx, my);
+        }
 
         if (!self.dragging) return;
         const tab = self.tabs.active() orelse return;
@@ -1752,4 +1847,35 @@ test "the digits select tabs one-based" {
     try testing.expectEqual(@as(usize, 0), shortcutFor(sdl.SDLK_1, gui).?.select_tab);
     try testing.expectEqual(@as(usize, 4), shortcutFor('5', gui).?.select_tab);
     try testing.expectEqual(@as(usize, 8), shortcutFor(sdl.SDLK_9, gui).?.select_tab);
+}
+
+test "a motion event names the lowest button it is holding" {
+    try testing.expectEqual(@as(?u8, null), App.heldButton(0));
+    try testing.expectEqual(@as(?u8, 0), App.heldButton(sdl.BUTTON_LMASK));
+    try testing.expectEqual(@as(?u8, 1), App.heldButton(sdl.BUTTON_MMASK));
+    try testing.expectEqual(@as(?u8, 2), App.heldButton(sdl.BUTTON_RMASK));
+    // Several at once: a report carries one, and left wins.
+    try testing.expectEqual(
+        @as(?u8, 0),
+        App.heldButton(sdl.BUTTON_LMASK | sdl.BUTTON_RMASK),
+    );
+}
+
+test "Shift is what reaches the selection while a program holds the mouse" {
+    const chrome: f32 = 40;
+    const in_terminal: f32 = 100;
+
+    // Nothing asked for the mouse: a press is always ztabb's to select with.
+    try testing.expect(!App.mouseGoesToProgram(in_terminal, chrome, false, false));
+    try testing.expect(!App.mouseGoesToProgram(in_terminal, chrome, false, true));
+
+    // Something did: the press is its business...
+    try testing.expect(App.mouseGoesToProgram(in_terminal, chrome, true, false));
+    // ...unless Shift is held, which is the only way to copy anything off the
+    // screen while such a program is running.
+    try testing.expect(!App.mouseGoesToProgram(in_terminal, chrome, true, true));
+
+    // The window's own chrome is never the program's, whatever it asked for.
+    try testing.expect(!App.mouseGoesToProgram(chrome - 1, chrome, true, false));
+    try testing.expect(!App.mouseGoesToProgram(0, chrome, true, false));
 }
