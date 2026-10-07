@@ -148,7 +148,7 @@ test "the file carries the PNG signature and the required chunks in order" {
 
 test "the header records the size, depth and colour type" {
     const gpa = testing.allocator;
-    const pixels = [_]u32{0} ** (4 * 4);
+    const pixels: [4 * 4]u32 = @splat(0);
     const png = try encodeArgb(gpa, &pixels, 4);
     defer gpa.free(png);
 
@@ -161,7 +161,7 @@ test "the header records the size, depth and colour type" {
 
 test "every chunk's CRC checks out" {
     const gpa = testing.allocator;
-    const pixels = [_]u32{0xFF00FF00} ** (8 * 8);
+    const pixels: [8 * 8]u32 = @splat(0xFF00FF00);
     const png = try encodeArgb(gpa, &pixels, 8);
     defer gpa.free(png);
 
@@ -181,7 +181,7 @@ test "every chunk's CRC checks out" {
 
 test "the zlib stream is well formed and its last block is marked final" {
     const gpa = testing.allocator;
-    const pixels = [_]u32{0xFFFFFFFF} ** (4 * 4);
+    const pixels: [4 * 4]u32 = @splat(0xFFFFFFFF);
     const png = try encodeArgb(gpa, &pixels, 4);
     defer gpa.free(png);
 

@@ -93,14 +93,14 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     b.step("run", "Run ztabb").dependOn(&run_cmd.step);
 
     // `zig build icon` renders the icon at every size an .icns carries and
     // hands the directory to iconutil; `zig build bundle` wraps the binary and
     // that icon into ztabb.app, which is what macOS needs to show the icon in
     // the Dock and Finder rather than only while the program runs.
-    const mkiconset_mod = mod(b, "tools/mkiconset.zig", b.graph.host, .Debug);
+    const mkiconset_mod = mod(b, "tools/mkiconset.zig", b.graph.host, .debug);
     mkiconset_mod.addImport("appicon", appicon_mod);
     mkiconset_mod.addImport("png", png_mod);
     const mkiconset = b.addExecutable(.{ .name = "mkiconset", .root_module = mkiconset_mod });
@@ -114,7 +114,7 @@ pub fn build(b: *std.Build) void {
     const icon_step = b.step("icon", "Render zig-out/ztabb.icns");
     icon_step.dependOn(&iconutil.step);
 
-    const mklogo_mod = mod(b, "tools/mklogo.zig", b.graph.host, .Debug);
+    const mklogo_mod = mod(b, "tools/mklogo.zig", b.graph.host, .debug);
     mklogo_mod.addImport("appicon", appicon_mod);
     mklogo_mod.addImport("png", png_mod);
     const mklogo = b.addExecutable(.{ .name = "mklogo", .root_module = mklogo_mod });
@@ -158,9 +158,9 @@ pub fn build(b: *std.Build) void {
     const core_step = b.step("test-core", "Run unit tests that do not need SDL3");
 
     const core_suites = [_][]const u8{
-        "theme",    "font",      "icons",     "appicon", "png",
-        "terminal", "highlight", "ssh",       "pty",     "tabs",
-        "macos",    "panes",     "pty-posix",
+        "theme",    "font",      "icons",     "appicon",              "png",
+        "terminal", "highlight", "ssh",       "pty",                  "tabs",
+        "macos",    "panes",     "pty-posix", "windows-command-line",
     };
 
     // `src/pty_posix.zig` cannot be built on Windows: it reaches for `environ`
@@ -184,6 +184,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ssh", .module = ssh_mod },
         .{ .name = "pty", .module = pty_mod },
         .{ .name = "pty-posix", .module = pty_posix_mod },
+        .{ .name = "windows-command-line", .module = mod(b, "src/windows_command_line.zig", target, optimize) },
         .{ .name = "tabs", .module = tabs_mod },
         .{ .name = "sdl", .module = sdl_mod },
         .{ .name = "render", .module = render_mod },

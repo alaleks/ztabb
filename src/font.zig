@@ -45,7 +45,7 @@ fn sectionAt(i: usize) Size {
     return .{
         .w = sct.w,
         .h = sct.h,
-        .weight = @enumFromInt(sct.weight),
+        .weight = @fromBackingInt(@intCast(sct.weight)),
         .points = sct.points,
         .density = sct.density,
         .offset = sct.offset,

@@ -8,6 +8,7 @@
 //! this file is written once.
 
 const std = @import("std");
+const command_line = @import("windows_command_line.zig");
 const windows = std.os.windows;
 
 const HANDLE = windows.HANDLE;
@@ -296,7 +297,7 @@ pub const Pty = struct {
         // touched. The client connects below, which is why no
         // `ConnectNamedPipe` is needed.
         var name_buf: [64]u8 = undefined;
-        const name = std.fmt.bufPrint(
+        const name = std.mem.print(
             &name_buf,
             "\\\\.\\pipe\\ztabb-in-{d}-{d}",
             .{ GetCurrentProcessId(), pipe_seq.fetchAdd(1, .monotonic) },
@@ -400,8 +401,11 @@ pub const Pty = struct {
         // stops that fallback, and the PTY connection remakes the real ones.
         si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
 
+        var command_buf: [4096]u8 = undefined;
+        const command = command_line.encode(argv, &command_buf) catch
+            return error.ForkFailed;
         var cmdline: [1024]u16 = undefined;
-        const n = std.unicode.utf8ToUtf16Le(&cmdline, std.mem.span(argv[0])) catch
+        const n = std.unicode.utf8ToUtf16Le(cmdline[0 .. cmdline.len - 1], command) catch
             return error.ForkFailed;
         cmdline[n] = 0;
 

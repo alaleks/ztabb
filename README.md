@@ -99,7 +99,7 @@ macOS app that is not quarantined — the rest of this section is for that.
 
 ## Requirements
 
-- Zig 0.16.0
+- Zig 0.17.0
 - SDL3 (`brew install sdl3`)
 
 ## Build
@@ -107,7 +107,7 @@ macOS app that is not quarantined — the rest of this section is for that.
 ```sh
 zig build                       # build
 zig build run                   # build and run
-zig build test                  # 386 unit tests
+zig build test                  # 436 unit tests
 zig build -Doptimize=ReleaseFast
 
 zig build bundle                # zig-out/ztabb.app, with its icon (macOS)

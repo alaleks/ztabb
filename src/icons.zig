@@ -25,7 +25,7 @@ pub const Icon = enum {
     terminal,
 };
 
-pub const count = @typeInfo(Icon).@"enum".fields.len;
+pub const count = @typeInfo(Icon).@"enum".field_names.len;
 
 /// The largest icon `buildStrip` rasterizes; bigger cells upscale from this.
 pub const max_size: u32 = 96;
@@ -188,7 +188,7 @@ pub fn buildStrip(size: u32, out: []u32) void {
 
     @memset(out[0..stripPixels(size)], 0x00FFFFFF);
     for (0..count) |i| {
-        const icon: Icon = @enumFromInt(i);
+        const icon: Icon = @fromBackingInt(@intCast(i));
         render(icon, capped, cell[0 .. capped * capped]);
         for (0..capped) |y| {
             const dst = y * w + i * size;
@@ -199,7 +199,7 @@ pub fn buildStrip(size: u32, out: []u32) void {
 
 /// X offset of `icon` within the strip.
 pub fn stripX(icon: Icon, size: u32) u32 {
-    return @as(u32, @intFromEnum(icon)) * size;
+    return @as(u32, @backingInt(icon)) * size;
 }
 
 // -- tests -----------------------------------------------------------------
@@ -225,7 +225,7 @@ test "every icon draws something at every size it is used at" {
     var buf: [max_size * max_size]u32 = undefined;
     for ([_]u32{ 12, 16, 24, 32, 48, 64, 96 }) |size| {
         for (0..count) |i| {
-            try testing.expect(inkOf(@enumFromInt(i), size, &buf) > 0);
+            try testing.expect(inkOf(@fromBackingInt(@intCast(i)), size, &buf) > 0);
         }
     }
 }
@@ -234,7 +234,7 @@ test "the set shares one stroke weight" {
     // What makes a set look like a set is the line weight, not the amount of
     // ink: a framed icon covers more of its box than a chevron does either way.
     for (0..count) |i| {
-        for (shapeOf(@enumFromInt(i))) |prim| {
+        for (shapeOf(@fromBackingInt(@intCast(i)))) |prim| {
             const w = switch (prim) {
                 .stroke => |x| x.w,
                 .frame => |x| x.w,
@@ -250,7 +250,7 @@ test "icons are antialiased rather than hard-edged" {
     var buf: [max_size * max_size]u32 = undefined;
     for (0..count) |i| {
         var partial: usize = 0;
-        for (renderIcon(@enumFromInt(i), 32, &buf)) |px| {
+        for (renderIcon(@fromBackingInt(@intCast(i)), 32, &buf)) |px| {
             const a = alphaOf(px);
             if (a != 0 and a != 255) partial += 1;
         }
@@ -274,7 +274,7 @@ test "strokes have round caps" {
 test "icon pixels are white with coverage in the alpha channel" {
     var buf: [max_size * max_size]u32 = undefined;
     for (0..count) |i| {
-        for (renderIcon(@enumFromInt(i), 24, &buf)) |px| {
+        for (renderIcon(@fromBackingInt(@intCast(i)), 24, &buf)) |px| {
             try testing.expectEqual(@as(u32, 0x00FFFFFF), px & 0x00FFFFFF);
         }
     }
@@ -365,7 +365,7 @@ test "icons stay inside their box" {
     var buf: [max_size * max_size]u32 = undefined;
     const size: u32 = 32;
     for (0..count) |i| {
-        const px = renderIcon(@enumFromInt(i), size, &buf);
+        const px = renderIcon(@fromBackingInt(@intCast(i)), size, &buf);
         for (0..size) |k| {
             try testing.expectEqual(@as(u8, 0), alphaOf(px[k]));
             try testing.expectEqual(@as(u8, 0), alphaOf(px[(size - 1) * size + k]));
@@ -380,7 +380,7 @@ test "an icon keeps its proportions as it scales" {
     // which is what "looks the same on every display" means in practice.
     var buf: [max_size * max_size]u32 = undefined;
     for (0..count) |i| {
-        const icon: Icon = @enumFromInt(i);
+        const icon: Icon = @fromBackingInt(@intCast(i));
         const small = @as(f64, @floatFromInt(inkOf(icon, 24, &buf))) / (24 * 24 * 255);
         const large = @as(f64, @floatFromInt(inkOf(icon, 96, &buf))) / (96 * 96 * 255);
         try testing.expect(@abs(small - large) < 0.03);
@@ -396,7 +396,7 @@ test "the strip places each icon at its own offset" {
 
     var cell: [max_size * max_size]u32 = undefined;
     for (0..count) |i| {
-        const icon: Icon = @enumFromInt(i);
+        const icon: Icon = @fromBackingInt(@intCast(i));
         const expected = renderIcon(icon, size, &cell);
         const x0 = stripX(icon, size);
         for (0..size) |y| {
@@ -413,7 +413,7 @@ test "the strip places each icon at its own offset" {
 
 test "stripX never runs past the strip" {
     for ([_]u32{ 16, 32, 64, 96 }) |size| {
-        const last: Icon = @enumFromInt(count - 1);
+        const last: Icon = @fromBackingInt(@intCast(count - 1));
         try testing.expect(stripX(last, size) + size <= stripW(size));
     }
 }

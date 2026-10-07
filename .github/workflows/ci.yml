@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
 
       - name: Install SDL3
         run: brew install sdl3
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
 
       # From the package manager where it exists, from source where it does
       # not: SDL3 is recent enough that older images carry no package.
@@ -97,7 +97,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
           # Provisional, and here to answer a question rather than to stay.
           #
           # This action restores `.zig-cache` between runs, and the test
@@ -237,7 +237,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
-          version: "0.16.0"
+          version: "0.17.0"
 
       # A host build hides platform-gated code. There is no SDL3 to link
       # against for these targets, so this compiles the core modules only.

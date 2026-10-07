@@ -82,7 +82,7 @@ pub const App = struct {
     /// Guards `onWindowEvent` against drawing inside its own draw.
     in_window_event: bool = false,
     /// The title last handed to SDL, so it is not reset every frame.
-    title_buf: [tabs_mod.MAX_LABEL + 16:0]u8 = [_:0]u8{0} ** (tabs_mod.MAX_LABEL + 16),
+    title_buf: [tabs_mod.MAX_LABEL + 16:0]u8 = @splat(0),
 
     pacer: IdlePacer = .{},
     /// The range the mouse is drawing, or has drawn, over the terminal.
@@ -550,7 +550,7 @@ pub const App = struct {
         // A menu already open takes the next click, whichever button it is.
         if (self.menu) |m| {
             const box = self.menuBox(m);
-            if (box.hit(x, y)) |i| self.runMenuItem(@enumFromInt(i));
+            if (box.hit(x, y)) |i| self.runMenuItem(@fromBackingInt(@intCast(i)));
             self.menu = null;
             self.ui_dirty = true;
             return;
@@ -588,6 +588,16 @@ pub const App = struct {
             self.ui_dirty = true;
             return;
         }
+
+        // A terminal click first chooses its pane. Mouse-aware programs in a
+        // previously focused pane must not steal a click aimed at a sibling.
+        if (y >= self.chromeH()) {
+            const tab = self.tabs.active() orelse return;
+            const cell = self.renderer.cellAtTab(self.chromeH(), x, y);
+            if (tab.tree.paneAt(self.tabs.area, cell.col, cell.row)) |id| {
+                tab.focused = id;
+            }
+        }
         if (self.mouseIsProgrammes(y)) {
             if (self.reportMouse(ev.button - 1, x, y, true)) {
                 if (ev.button == sdl.BUTTON_LEFT) self.swallowed_press = .{ .x = x, .y = y };
@@ -602,13 +612,8 @@ pub const App = struct {
         // Below the chrome is the terminal: a press there starts a selection.
         if (y >= self.chromeH()) {
             const tab = self.tabs.active() orelse return;
-            // A click lands in whichever pane it fell on, and focuses it.
-            const cell = self.renderer.cellAtTab(self.chromeH(), x, y);
-            if (tab.tree.paneAt(self.tabs.area, cell.col, cell.row)) |id| {
-                tab.focused = id;
-            }
             const t = &tab.active().terminal;
-            const at = self.renderer.cellAt(t, self.chromeH(), x, y);
+            const at = self.renderer.cellAt(t, self.activePaneRect(tab), self.chromeH(), x, y);
             // Held against the buffer rather than the viewport, so scrolling
             // moves the view across the selection instead of dragging it along.
             const abs = t.absRow(at.row);
@@ -727,7 +732,13 @@ pub const App = struct {
         const held = heldButton(state);
         if (!p.terminal.mouse.wantsMotion(held != null)) return;
 
-        const at = self.renderer.cellAt(&p.terminal, self.chromeH(), x, y);
+        const at = self.renderer.cellAt(
+            &p.terminal,
+            self.activePaneRect(tab),
+            self.chromeH(),
+            x,
+            y,
+        );
         if (self.last_motion_cell) |last| {
             if (last.col == at.col and last.row == at.row) return;
         }
@@ -751,7 +762,13 @@ pub const App = struct {
         const p = tab.active();
         if (!p.terminal.mouse.wants()) return false;
 
-        const at = self.renderer.cellAt(&p.terminal, self.chromeH(), x, y);
+        const at = self.renderer.cellAt(
+            &p.terminal,
+            self.activePaneRect(tab),
+            self.chromeH(),
+            x,
+            y,
+        );
         var buf: [32]u8 = undefined;
         const report = p.terminal.mouse.encode(&buf, button, at.col, at.row, pressed);
         if (report.len > 0) p.pty.write(report) catch {};
@@ -801,7 +818,7 @@ pub const App = struct {
 
     fn runMenuItem(self: *App, item: MenuItem) void {
         const on = self.menuEnabled();
-        if (!on[@intFromEnum(item)]) return;
+        if (!on[@backingInt(item)]) return;
         switch (item) {
             .copy => self.copy(),
             .paste => self.paste(),
@@ -855,7 +872,13 @@ pub const App = struct {
         const scale: f32 = self.density;
         self.drag_y = ev.y * scale;
         const t = &tab.active().terminal;
-        const at = self.renderer.cellAt(t, self.chromeH(), ev.x * scale, self.drag_y);
+        const at = self.renderer.cellAt(
+            t,
+            self.activePaneRect(tab),
+            self.chromeH(),
+            ev.x * scale,
+            self.drag_y,
+        );
         if (self.selection) |*sel| {
             sel.head_row = t.absRow(at.row);
             sel.head_col = at.col;
@@ -960,6 +983,7 @@ pub const App = struct {
             const scale: f32 = self.density;
             const at = self.renderer.cellAt(
                 &p.terminal,
+                self.activePaneRect(tab),
                 self.chromeH(),
                 ev.mouse_x * scale,
                 ev.mouse_y * scale,
@@ -1002,6 +1026,12 @@ pub const App = struct {
             self.dragging = false;
             self.ui_dirty = true;
         }
+    }
+
+    fn activePaneRect(self: *const App, tab: *const tabs_mod.Tab) panes.Rect {
+        var rects: [panes.MAX_PANES]panes.Rect = @splat(.{});
+        tab.tree.layout(self.tabs.area, &rects);
+        return rects[tab.focused];
     }
 
     fn splitPane(self: *App, dir: panes.Dir) void {
@@ -1056,7 +1086,12 @@ pub const App = struct {
         var wanted: usize = 0;
         var sent: usize = 0;
 
-        if (bracketed) _ = self.tabs.writeAll("\x1b[200~");
+        const paste_start = "\x1b[200~";
+        const paste_end = "\x1b[201~";
+        if (bracketed and self.tabs.writeAll(paste_start) != paste_start.len) {
+            self.showToast("paste failed: bracket marker was not delivered", .{});
+            return;
+        }
 
         var buf: [4096]u8 = undefined;
         var n: usize = 0;
@@ -1075,13 +1110,15 @@ pub const App = struct {
         wanted += n;
         sent += self.tabs.writeAll(buf[0..n]);
 
-        if (bracketed) _ = self.tabs.writeAll("\x1b[201~");
+        const closed = !bracketed or self.tabs.writeAll(paste_end) == paste_end.len;
 
         // Cut short only by a child that stopped reading for a whole second.
         // Said plainly, because the alternative is the user finding half a
         // command on the line and no reason for it.
         if (sent < wanted) {
             self.showToast("paste cut short: {d} of {d} bytes", .{ sent, wanted });
+        } else if (!closed) {
+            self.showToast("paste warning: closing marker was not delivered", .{});
         }
     }
 
@@ -1116,10 +1153,15 @@ pub const App = struct {
             return;
         }
 
-        var buf: [64 * 1024:0]u8 = undefined;
-        const text = term.selectedText(&tab.active().terminal, sel, buf[0 .. buf.len - 1]);
+        const capacity = term.selectedTextCapacity(&tab.active().terminal, sel);
+        const buf = self.gpa.alloc(u8, capacity + 1) catch {
+            self.showToast("copy failed: out of memory", .{});
+            return;
+        };
+        defer self.gpa.free(buf);
+        const text = term.selectedText(&tab.active().terminal, sel, buf[0..capacity]);
         buf[text.len] = 0;
-        sdl.setClipboardText(@ptrCast(&buf));
+        sdl.setClipboardText(@ptrCast(buf.ptr));
         if (traceOn()) std.debug.print("ZTRACE copy: took {d} bytes\n", .{text.len});
         self.showToast("copied {d} chars", .{text.len});
     }
@@ -1186,7 +1228,7 @@ pub const App = struct {
 
     fn showToast(self: *App, comptime fmt: []const u8, args: anytype) void {
         var t = Toast{ .buf = undefined, .len = 0, .until = sdl.ticks() + TOAST_MS };
-        const written = std.fmt.bufPrint(&t.buf, fmt, args) catch t.buf[0..0];
+        const written = std.mem.print(&t.buf, fmt, args) catch t.buf[0..0];
         t.len = written.len;
         self.toast = t;
         self.ui_dirty = true;
@@ -1323,7 +1365,7 @@ pub const App = struct {
         var buf: [tabs_mod.MAX_LABEL + 16:0]u8 = undefined;
         var name_buf: [tabs_mod.MAX_LABEL * 2 + 8]u8 = undefined;
         const name = tab.displayName(&name_buf);
-        const written = std.fmt.bufPrintZ(&buf, "{s}", .{name}) catch return;
+        const written = std.mem.printSentinel(&buf, "{s}", .{name}, 0) catch return;
         if (std.mem.eql(u8, written, std.mem.sliceTo(&self.title_buf, 0))) return;
         @memcpy(self.title_buf[0..written.len], written);
         self.title_buf[written.len] = 0;
@@ -1467,7 +1509,7 @@ pub fn encodeKey(key: u32, mods: u16, buf: []u8) ?[]const u8 {
             // 1 plus a bit each for shift, alt and control, as every terminal
             // that speaks this spells it.
             const code: u8 = 1 + @as(u8, if (shift) 1 else 0) + @as(u8, if (ctrl) 4 else 0);
-            return std.fmt.bufPrint(buf, "\x1b[1;{d}{c}", .{ code, final }) catch null;
+            return std.mem.print(buf, "\x1b[1;{d}{c}", .{ code, final }) catch null;
         }
     }
 

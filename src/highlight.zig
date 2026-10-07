@@ -540,8 +540,8 @@ test "colorize tolerates a colour buffer shorter than the input" {
 }
 
 test "every kind maps to a colour in both themes" {
-    inline for (std.meta.fields(Kind)) |f| {
-        const k: Kind = @enumFromInt(f.value);
+    inline for (@typeInfo(Kind).@"enum".field_values) |value| {
+        const k: Kind = @fromBackingInt(@intCast(value));
         try testing.expect(k.color(&theme.dark) != k.color(&theme.light) or
             k.color(&theme.dark) != 0);
     }

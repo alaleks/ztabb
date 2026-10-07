@@ -95,6 +95,7 @@ pub fn parseText(
     out: *std.ArrayListUnmanaged(Host),
 ) std.mem.Allocator.Error!void {
     var lines = std.mem.splitScalar(u8, text, '\n');
+    var block_start: ?usize = null;
     while (lines.next()) |raw| {
         const line = trim(raw);
         if (line.len == 0 or line[0] == '#') continue;
@@ -105,6 +106,7 @@ pub fn parseText(
 
         if (std.ascii.eqlIgnoreCase(key, "host")) {
             // A single `Host` line may declare several aliases.
+            const first = out.items.len;
             var names = std.mem.tokenizeAny(u8, value, " \t");
             while (names.next()) |name| {
                 if (out.items.len >= MAX_HOSTS) return;
@@ -116,22 +118,27 @@ pub fn parseText(
                     .is_pattern = std.mem.indexOfAny(u8, name, "*?") != null,
                 });
             }
+            block_start = if (out.items.len > first) first else null;
             continue;
         }
 
         // Any other directive applies to the most recent Host block. Lines
         // before the first Host are global defaults with nowhere to go.
-        if (out.items.len == 0) continue;
-        const host = &out.items[out.items.len - 1];
+        const first = block_start orelse continue;
+        const hosts = out.items[first..];
 
         if (std.ascii.eqlIgnoreCase(key, "hostname")) {
-            host.hostname = try a.dupe(u8, unquote(value));
+            const parsed = try a.dupe(u8, unquote(value));
+            for (hosts) |*host| host.hostname = parsed;
         } else if (std.ascii.eqlIgnoreCase(key, "user")) {
-            host.user = try a.dupe(u8, unquote(value));
+            const parsed = try a.dupe(u8, unquote(value));
+            for (hosts) |*host| host.user = parsed;
         } else if (std.ascii.eqlIgnoreCase(key, "identityfile")) {
-            host.identity_file = try a.dupe(u8, unquote(value));
+            const parsed = try a.dupe(u8, unquote(value));
+            for (hosts) |*host| host.identity_file = parsed;
         } else if (std.ascii.eqlIgnoreCase(key, "port")) {
-            host.port = std.fmt.parseInt(u16, unquote(value), 10) catch host.port;
+            const parsed = std.fmt.parseInt(u16, unquote(value), 10) catch continue;
+            for (hosts) |*host| host.port = parsed;
         }
     }
 }
@@ -167,17 +174,79 @@ fn followIncludes(
 
         var patterns = std.mem.tokenizeAny(u8, kv.value, " \t");
         while (patterns.next()) |pattern| {
-            // Globs are not expanded; a literal path is the common case.
-            if (std.mem.indexOfAny(u8, pattern, "*?") != null) continue;
             const path = if (pattern.len > 0 and pattern[0] == '/')
                 try a.dupe(u8, pattern)
             else if (std.mem.startsWith(u8, pattern, "~/"))
                 try std.fs.path.join(a, &.{ home, pattern[2..] })
             else
                 try std.fs.path.join(a, &.{ home, ".ssh", pattern });
-            try parseFile(a, io, path, out, depth);
+            if (std.mem.indexOfAny(u8, path, "*?") == null) {
+                try parseFile(a, io, path, out, depth);
+            } else {
+                try parseGlob(a, io, path, out, depth);
+            }
         }
     }
+}
+
+/// Expands wildcards in the final path component. This covers OpenSSH's
+/// conventional `Include ~/.ssh/config.d/*` layout while keeping traversal
+/// bounded to the directory explicitly named by the user.
+fn parseGlob(
+    a: std.mem.Allocator,
+    io: std.Io,
+    pattern: []const u8,
+    out: *std.ArrayListUnmanaged(Host),
+    depth: u8,
+) ParseError!void {
+    const dir_path = std.fs.path.dirname(pattern) orelse ".";
+    const name_pattern = std.fs.path.basename(pattern);
+    if (std.mem.indexOfAny(u8, dir_path, "*?") != null) return;
+
+    var dir = if (std.fs.path.isAbsolute(dir_path))
+        std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return
+    else
+        std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer paths.deinit(a);
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind == .directory or !wildcardMatch(name_pattern, entry.name)) continue;
+        try paths.append(a, try std.fs.path.join(a, &.{ dir_path, entry.name }));
+    }
+    std.mem.sort([]const u8, paths.items, {}, struct {
+        fn before(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return std.mem.order(u8, lhs, rhs) == .lt;
+        }
+    }.before);
+    for (paths.items) |path| try parseFile(a, io, path, out, depth);
+}
+
+fn wildcardMatch(pattern: []const u8, name: []const u8) bool {
+    var p: usize = 0;
+    var n: usize = 0;
+    var star: ?usize = null;
+    var retry: usize = 0;
+    while (n < name.len) {
+        if (p < pattern.len and (pattern[p] == '?' or pattern[p] == name[n])) {
+            p += 1;
+            n += 1;
+        } else if (p < pattern.len and pattern[p] == '*') {
+            star = p;
+            p += 1;
+            retry = n;
+        } else if (star) |at| {
+            p = at + 1;
+            retry += 1;
+            n = retry;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.len and pattern[p] == '*') p += 1;
+    return p == pattern.len;
 }
 
 /// The user's home directory: `$HOME`, or `%USERPROFILE%` on Windows, which
@@ -272,9 +341,15 @@ test "one Host line can declare several aliases" {
     try testing.expectEqual(@as(usize, 3), hosts.len);
     try testing.expectEqualStrings("web1", hosts[0].alias);
     try testing.expectEqualStrings("web3", hosts[2].alias);
-    // Directives attach to the last alias on the line, matching ssh's own
-    // behaviour of applying the block to every listed pattern.
-    try testing.expectEqualStrings("www", hosts[2].user);
+    for (hosts) |host| try testing.expectEqualStrings("www", host.user);
+}
+
+test "include filename wildcards match the usual config directory layout" {
+    try testing.expect(wildcardMatch("*", "prod.conf"));
+    try testing.expect(wildcardMatch("*.conf", "prod.conf"));
+    try testing.expect(wildcardMatch("host-?.conf", "host-a.conf"));
+    try testing.expect(!wildcardMatch("*.conf", "README"));
+    try testing.expect(!wildcardMatch("host-?.conf", "host-long.conf"));
 }
 
 test "wildcard hosts are flagged as patterns" {
@@ -447,8 +522,8 @@ test "command yields a null-terminated alias" {
 }
 
 test "command rejects an over-long alias rather than overflowing" {
-    const long = "x" ** (MAX_FIELD + 4);
-    const host = Host{ .alias = long };
+    const long: [MAX_FIELD + 4]u8 = @splat('x');
+    const host = Host{ .alias = &long };
     var buf: [MAX_FIELD:0]u8 = undefined;
     try testing.expectError(error.NameTooLong, host.command(&buf));
 }
@@ -467,12 +542,15 @@ test "fuzzing the config parser never panics and keeps every host usable" {
     // out into fields of fixed width. What it must never do is overrun one, or
     // hand back a host `command` cannot spell -- both would be reached before
     // the window is even up.
+    const almost_long: [MAX_FIELD - 1]u8 = @splat('x');
+    const exact_long: [MAX_FIELD]u8 = @splat('y');
+    const too_long: [MAX_FIELD + 7]u8 = @splat('z');
     const words = [_][]const u8{
-        "Host",           "HostName",             "User",       "Port", "IdentityFile",
-        "Match",          "ProxyJump",            "*",          "?",    "!secret",
-        "a",              "h1",                   "\"quoted\"", "#c",   "=",
-        "\t",             " ",                    "\r",         "",     "x" ** (MAX_FIELD - 1),
-        "y" ** MAX_FIELD, "z" ** (MAX_FIELD + 7),
+        "Host",      "HostName",  "User",       "Port", "IdentityFile",
+        "Match",     "ProxyJump", "*",          "?",    "!secret",
+        "a",         "h1",        "\"quoted\"", "#c",   "=",
+        "\t",        " ",         "\r",         "",     &almost_long,
+        &exact_long, &too_long,
     };
 
     var prng = std.Random.DefaultPrng.init(0xC0FFEE);

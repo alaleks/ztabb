@@ -136,7 +136,7 @@ pub const Terminal = struct {
     compactions: u32 = 0,
 
     /// Window title from OSC 0/1/2, used as the tab label.
-    title: [MAX_TITLE]u8 = [_]u8{0} ** MAX_TITLE,
+    title: [MAX_TITLE]u8 = @splat(0),
     title_len: usize = 0,
 
     /// True whenever the screen changed since the renderer last cleared it.
@@ -150,15 +150,15 @@ pub const Terminal = struct {
     mouse: MouseMode = .{},
 
     state: ParseState = .ground,
-    params: [MAX_PARAMS]u32 = [_]u32{0} ** MAX_PARAMS,
+    params: [MAX_PARAMS]u32 = @splat(0),
     param_count: usize = 0,
     param_active: bool = false,
     /// CSI private marker such as `?` in `ESC [ ? 25 l`.
     csi_private: u8 = 0,
-    osc_buf: [MAX_TITLE]u8 = [_]u8{0} ** MAX_TITLE,
+    osc_buf: [MAX_TITLE]u8 = @splat(0),
     osc_len: usize = 0,
     /// Partially received UTF-8 sequence carried across `write` calls.
-    utf8: [4]u8 = [_]u8{0} ** 4,
+    utf8: [4]u8 = @splat(0),
     utf8_len: u3 = 0,
     utf8_need: u3 = 0,
 
@@ -1119,7 +1119,7 @@ pub const Terminal = struct {
     fn feedEsc(self: *Terminal, byte: u8) void {
         switch (byte) {
             '[' => {
-                self.params = [_]u32{0} ** MAX_PARAMS;
+                self.params = @splat(0);
                 self.param_count = 0;
                 self.param_active = false;
                 self.csi_private = 0;
@@ -1496,7 +1496,7 @@ pub const MouseMode = struct {
         pressed: bool,
     ) []const u8 {
         if (self.sgr) {
-            return std.fmt.bufPrint(buf, "\x1b[<{d};{d};{d}{c}", .{
+            return std.mem.print(buf, "\x1b[<{d};{d};{d}{c}", .{
                 button,
                 col + 1,
                 row + 1,
@@ -1594,6 +1594,18 @@ pub fn selectedText(t: *const Terminal, sel: Selection, buf: []u8) []const u8 {
     return buf[0..n];
 }
 
+/// An upper bound for the UTF-8 bytes `selectedText` can write. Each terminal
+/// cell is one Unicode code point (at most four bytes), plus one line break per
+/// selected row. The bound lets callers allocate once without truncating.
+pub fn selectedTextCapacity(t: *const Terminal, sel: Selection) usize {
+    if (sel.isEmpty()) return 0;
+    const r = sel.ordered();
+    if (r.start.row >= t.absRows()) return 0;
+    const last = @min(r.end.row, t.absRows() - 1);
+    const rows = @as(usize, last - r.start.row) + 1;
+    return rows * (@as(usize, t.cols) * 4 + 1);
+}
+
 // -- tests -----------------------------------------------------------------
 
 const testing = std.testing;
@@ -1657,7 +1669,7 @@ test "growing the history keeps the rows in order" {
     // Enough lines to cross at least one growth step.
     for (0..200) |i| {
         var buf: [8]u8 = undefined;
-        t.write(std.fmt.bufPrint(&buf, "{d}\r\n", .{i % 10}) catch unreachable);
+        t.write(std.mem.print(&buf, "{d}\r\n", .{i % 10}) catch unreachable);
     }
     // The most recent scrolled-off row must be the one written just before it.
     const last = t.scrollbackRow(1).?;
@@ -1715,7 +1727,7 @@ test "compaction keeps the newest rows, in order" {
     t.memory_budget = 4096 * 4 * @sizeOf(Cell) / 4; // forces a shrink below
     for (0..600) |i| {
         var buf: [8]u8 = undefined;
-        t.write(std.fmt.bufPrint(&buf, "{d}\r\n", .{i % 10}) catch unreachable);
+        t.write(std.mem.print(&buf, "{d}\r\n", .{i % 10}) catch unreachable);
     }
     const before = t.sb_len;
     const newest = t.scrollbackRow(1).?[0].ch;
@@ -1877,6 +1889,25 @@ test "copying never runs past the buffer it was given" {
     const all = Selection{ .anchor_row = 0, .anchor_col = 0, .head_row = 5, .head_col = 40, .active = true };
     const out = selectedText(&t, all, &small);
     try testing.expect(out.len <= small.len);
+}
+
+test "selection capacity permits copying more than 64 KiB" {
+    var t = try testTerm(256, 300);
+    defer t.deinit();
+    for (t.cells) |*cell| cell.ch = 'x';
+
+    const sel = Selection{
+        .anchor_row = 0,
+        .anchor_col = 0,
+        .head_row = t.rows - 1,
+        .head_col = t.cols,
+        .active = true,
+    };
+    const capacity = selectedTextCapacity(&t, sel);
+    const buf = try testing.allocator.alloc(u8, capacity);
+    defer testing.allocator.free(buf);
+    const text = selectedText(&t, sel, buf);
+    try testing.expect(text.len > 64 * 1024);
 }
 
 test "selection reads the scrolled-back view, not the live screen" {
@@ -3106,7 +3137,7 @@ test "resizing on the alternate screen does not leave the ring turned" {
     // output leave `row_base` somewhere other than zero.
     for (0..9) |i| {
         var buf: [8]u8 = undefined;
-        t.write(std.fmt.bufPrint(&buf, "L{d}\r\n", .{i}) catch unreachable);
+        t.write(std.mem.print(&buf, "L{d}\r\n", .{i}) catch unreachable);
     }
     try testing.expect(t.row_base != 0);
 
@@ -3170,7 +3201,7 @@ test "text is selectable on the alternate screen" {
     // absolute rows a selection is held in do not start at the screen.
     for (0..6) |i| {
         var buf: [8]u8 = undefined;
-        t.write(std.fmt.bufPrint(&buf, "old{d}\r\n", .{i}) catch unreachable);
+        t.write(std.mem.print(&buf, "old{d}\r\n", .{i}) catch unreachable);
     }
     try testing.expect(t.sb_len > 0);
 

@@ -847,14 +847,40 @@ pub const Renderer = struct {
 
     /// The grid cell under a point, clamped to the grid. `top` is where the
     /// terminal area begins.
-    pub fn cellAt(self: *const Renderer, t: *const term.Terminal, top: f32, x: f32, y: f32) struct { row: u32, col: u32 } {
+    pub fn cellAt(
+        self: *const Renderer,
+        t: *const term.Terminal,
+        rect: panes.Rect,
+        top: f32,
+        x: f32,
+        y: f32,
+    ) GridCell {
         const cw: f32 = @floatFromInt(self.cellW());
         const ch: f32 = @floatFromInt(self.cellH());
-        const col_f = (x - self.padX()) / cw;
-        const row_f = (y - top - self.padY()) / ch;
+        return cellAtGrid(t.cols, t.rows, rect, self.padX(), self.padY(), cw, ch, top, x, y);
+    }
+
+    const GridCell = struct { row: u32, col: u32 };
+
+    fn cellAtGrid(
+        cols: u32,
+        rows: u32,
+        rect: panes.Rect,
+        pad_x: f32,
+        pad_y: f32,
+        cw: f32,
+        ch: f32,
+        top: f32,
+        x: f32,
+        y: f32,
+    ) GridCell {
+        const left = pad_x + @as(f32, @floatFromInt(rect.x)) * cw;
+        const origin = top + pad_y + @as(f32, @floatFromInt(rect.y)) * ch;
+        const col_f = (x - left) / cw;
+        const row_f = (y - origin) / ch;
         const col: u32 = if (col_f <= 0) 0 else @intFromFloat(col_f);
         const row: u32 = if (row_f <= 0) 0 else @intFromFloat(row_f);
-        return .{ .row = @min(row, t.rows - 1), .col = @min(col, t.cols) };
+        return .{ .row = @min(row, rows - 1), .col = @min(col, cols) };
     }
 
     /// Draws a split label: the path dim, the directory bright.
@@ -1870,8 +1896,8 @@ test "the host column starts at the same place whatever the names are" {
 test "a name too long for its column wraps instead of overflowing" {
     var rows = [_]HostRow{
         .{ .alias = "short", .detail = "10.0.0.1" },
-        .{ .alias = "x" ** 40, .detail = "10.0.0.2" },
-        .{ .alias = "y" ** 400, .detail = "10.0.0.3" },
+        .{ .alias = &@as([40]u8, @splat('x')), .detail = "10.0.0.2" },
+        .{ .alias = &@as([400]u8, @splat('y')), .detail = "10.0.0.3" },
     };
     const p: Picker = .{
         .cell_w = 8,
@@ -1939,7 +1965,7 @@ test "the two columns together never overrun the box" {
 test "clicks land on the right host when entries are different heights" {
     var rows = [_]HostRow{
         .{ .alias = "one", .detail = "" },
-        .{ .alias = "t" ** 40, .detail = "" }, // two lines
+        .{ .alias = &@as([40]u8, @splat('t')), .detail = "" }, // two lines
         .{ .alias = "three", .detail = "" },
     };
     const p: Picker = .{
@@ -1956,6 +1982,24 @@ test "clicks land on the right host when entries are different heights" {
     try testing.expectEqual(@as(usize, 1), p.hitRow(x, p.lineY(2) + 2, 0).?); // its second line
     try testing.expectEqual(@as(usize, 2), p.hitRow(x, p.lineY(3) + 2, 0).?);
     try testing.expect(p.hitRow(x, p.lineY(4) + 2, 0) == null);
+}
+
+test "pane cell coordinates are relative to the pane rectangle" {
+    const rect = panes.Rect{ .x = 40, .y = 7, .w = 30, .h = 12 };
+    const at = Renderer.cellAtGrid(
+        30,
+        12,
+        rect,
+        4,
+        6,
+        8,
+        16,
+        50,
+        4 + 40 * 8 + 3 * 8 + 1,
+        50 + 6 + 7 * 16 + 2 * 16 + 1,
+    );
+    try testing.expectEqual(@as(u32, 3), at.col);
+    try testing.expectEqual(@as(u32, 2), at.row);
 }
 
 fn testToast(chars: usize) Toast {

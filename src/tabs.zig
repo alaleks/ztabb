@@ -271,7 +271,7 @@ pub const Tabs = struct {
             .focused = 0,
             .kind = kind,
             .connecting = kind == .ssh,
-            .label = [_]u8{0} ** MAX_LABEL,
+            .label = @splat(0),
             .label_len = 0,
         };
         self.items[self.count].slots[0] = .{ .pty = p, .terminal = t };
@@ -421,7 +421,7 @@ pub const Tabs = struct {
             const take = @min(bytes.len - at, line.len / 2);
             var n: usize = 0;
             for (bytes[at..][0..take]) |b| {
-                n += (std.fmt.bufPrint(line[n..], "{x:0>2}", .{b}) catch break).len;
+                n += (std.mem.print(line[n..], "{x:0>2}", .{b}) catch break).len;
             }
             std.debug.print("ZTRACE {s}\n", .{line[0..n]});
             at += take;
@@ -690,7 +690,7 @@ fn addTestTab(tabs: *Tabs, name: []const u8, cols: u32, rows: u32) !usize {
         .tree = panes.Tree.single(),
         .focused = 0,
         .kind = .shell,
-        .label = [_]u8{0} ** MAX_LABEL,
+        .label = @splat(0),
         .label_len = 0,
     };
     tabs.items[tabs.count].slots[0] = .{ .pty = p, .terminal = t };
@@ -912,8 +912,8 @@ test "folderOf drops a trailing program name" {
 test "an over-long label is truncated" {
     var tabs = Tabs.init(testing.allocator);
     defer tabs.deinit();
-    const long = "n" ** (MAX_LABEL * 2);
-    _ = try addTestTab(&tabs, long, 80, 24);
+    const long: [MAX_LABEL * 2]u8 = @splat('n');
+    _ = try addTestTab(&tabs, &long, 80, 24);
     var name_buf: [MAX_LABEL * 2]u8 = undefined;
     try testing.expectEqual(MAX_LABEL, tabs.active().?.displayName(&name_buf).len);
 }
@@ -1035,7 +1035,7 @@ test "reapExited closes tabs whose child is gone" {
         .tree = panes.Tree.single(),
         .focused = 0,
         .kind = .shell,
-        .label = [_]u8{0} ** MAX_LABEL,
+        .label = @splat(0),
         .label_len = 0,
     };
     tabs.items[1].slots[0] = .{ .pty = p, .terminal = t };
@@ -1322,7 +1322,7 @@ test "a paste past the drop threshold reaches the child whole" {
         .tree = panes.Tree.single(),
         .focused = 0,
         .kind = .shell,
-        .label = [_]u8{0} ** MAX_LABEL,
+        .label = @splat(0),
         .label_len = 0,
     };
     tabs.items[0].slots[0] = .{ .pty = p, .terminal = t };

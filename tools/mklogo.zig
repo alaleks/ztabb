@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(bytes);
 
         var name: [32]u8 = undefined;
-        const sub = try std.fmt.bufPrint(&name, "logo-{d}.png", .{i});
+        const sub = try std.mem.print(&name, "logo-{d}.png", .{i});
         try dir.writeFile(io, .{ .sub_path = sub, .data = bytes });
     }
 }

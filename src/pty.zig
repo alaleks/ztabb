@@ -332,7 +332,7 @@ test "write does not block a child that has stopped reading" {
     // Far more than any input buffer holds. A child that never reads fills the
     // pipe, and a blocking write would wedge this test for ever; the pty must
     // drop the overflow and return instead.
-    var junk = [_]u8{'x'} ** (256 * 1024);
+    var junk: [256 * 1024]u8 = @splat('x');
     step("write more than the pipe holds");
     try pty.write(&junk);
     step("write returned");
@@ -389,7 +389,7 @@ test "writeSome reports what it took and never waits for room" {
     // the write is taken back once WRITE_MS is up. Either way the call has to
     // return, promptly and with a count -- a caller that must not lose bytes
     // retries and drains between tries, which it can only do if this comes back.
-    var junk = [_]u8{'x'} ** (64 * 1024);
+    var junk: [64 * 1024]u8 = @splat('x');
     var total: usize = 0;
     step("offer more than the pipe holds, repeatedly");
     for (0..64) |_| {

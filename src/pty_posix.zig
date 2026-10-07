@@ -23,7 +23,7 @@ const TIOCSCTTY: c_ulong = switch (builtin.os.tag) {
     else => 0x20007461,
 };
 
-// The pty layer is inherently POSIX, and `std.posix` in 0.16 no longer wraps
+// The pty layer is inherently POSIX, and `std.posix` in 0.17 no longer wraps
 // most of what it needs, so the calls are declared against libc directly. They
 // live in a namespace so names like `close` and `write` do not collide with
 // `Pty`'s own methods.
@@ -65,13 +65,13 @@ const POLLIN: c_short = 0x0001;
 const F_GETFL: c_int = posix.F.GETFL;
 const F_SETFL: c_int = posix.F.SETFL;
 const O_NONBLOCK: c_int = @bitCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-const SIGHUP: c_int = @intFromEnum(posix.SIG.HUP);
-const SIGKILL: c_int = @intFromEnum(posix.SIG.KILL);
+const SIGHUP: c_int = @backingInt(posix.SIG.HUP);
+const SIGKILL: c_int = @backingInt(posix.SIG.KILL);
 const WNOHANG: c_int = 1;
 const F_OK: c_int = 0;
 
 fn errno() posix.E {
-    return @enumFromInt(std.c._errno().*);
+    return @fromBackingInt(@intCast(std.c._errno().*));
 }
 
 pub const SpawnError = error{
@@ -322,7 +322,7 @@ const Env = struct {
 };
 
 fn buildEnv(extra: []const [*:0]const u8) Env {
-    var env: Env = .{ .entries = [_:null]?[*:0]const u8{null} ** Env.MAX_ENV };
+    var env: Env = .{ .entries = @splat(null) };
     var n: usize = 0;
 
     for (extra) |e| {
@@ -362,7 +362,7 @@ fn childExec(slave: c_int, argv: []const [*:0]const u8, env: *Env) void {
         if (slave > 2) _ = libc.close(slave);
     }
 
-    var cargv: [64:null]?[*:0]const u8 = [_:null]?[*:0]const u8{null} ** 64;
+    var cargv: [64:null]?[*:0]const u8 = @splat(null);
     const count = @min(argv.len, cargv.len);
     for (argv[0..count], 0..) |a, i| cargv[i] = a;
 
