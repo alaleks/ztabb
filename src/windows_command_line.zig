@@ -2,7 +2,7 @@
 //! CommandLineToArgvW and the Microsoft C runtime.
 
 const std = @import("std");
-r
+
 pub const Error = error{BufferTooSmall};
 
 pub fn encode(argv: []const [*:0]const u8, buf: []u8) Error![]const u8 {

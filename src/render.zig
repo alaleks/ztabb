@@ -1010,6 +1010,7 @@ pub const Renderer = struct {
         self: *Renderer,
         hosts: []const HostRow,
         selected: usize,
+        query: []const u8,
         th: *const theme.Theme,
         width: f32,
         height: f32,
@@ -1025,15 +1026,34 @@ pub const Renderer = struct {
         self.fill(x - 2, y - 2, p.boxW() + 4, p.boxH() + 4, th.tab_border);
         self.fill(x, y, p.boxW(), p.boxH(), th.bg);
 
-        _ = self.drawUiText(
-            "SSH hosts  (\u{2191}/\u{2193} or click, Enter open, Esc cancel)",
-            x + cw,
-            self.uiTextY(y, ch),
-            th.ansi[4],
-        );
+        const icon_size = self.iconDrawSize() * 0.8;
+        self.drawIcon(.remote, x + cw, y, icon_size, ch, th.ansi[4], 0.8);
+        const title_x = x + cw + icon_size + cw / 2;
+        var title_buf: [96]u8 = undefined;
+        const title = std.mem.print(&title_buf, "SSH connections  {d} found", .{hosts.len}) catch "SSH connections";
+        _ = self.drawUiText(title, title_x, self.uiTextY(y, ch), th.ansi[4]);
+
+        const search_x = x + cw / 2;
+        const search_y = y + ch;
+        self.fill(search_x, search_y, p.boxW() - cw, ch, th.tab_bar_bg);
+        var search_buf: [160]u8 = undefined;
+        const search = if (query.len == 0)
+            "Search by profile, host or user\u{2026}"
+        else
+            std.mem.print(&search_buf, "Search  {s}_", .{query}) catch query;
+        _ = self.drawUiText(search, x + cw, self.uiTextY(search_y, ch), th.fg);
+
+        const header_y = y + ch * 2;
+        _ = self.drawUiText("PROFILE", x + cw, self.uiTextY(header_y, ch), th.tab_inactive_fg);
+        const header_detail_x = x + cw + self.uiCellW() * @as(f32, @floatFromInt(p.nameCols()));
+        _ = self.drawUiText("DESTINATION", header_detail_x, self.uiTextY(header_y, ch), th.tab_inactive_fg);
 
         if (hosts.len == 0) {
-            _ = self.drawUiText("no hosts in ~/.ssh/config", x + cw, y + ch * 2, th.tab_inactive_fg);
+            const empty = if (query.len == 0)
+                "No hosts in ~/.ssh/config"
+            else
+                "No matching hosts  (Esc clears search)";
+            _ = self.drawUiText(empty, x + cw, self.uiTextY(p.lineY(0), ch), th.tab_inactive_fg);
             return;
         }
 
@@ -1050,6 +1070,8 @@ pub const Renderer = struct {
             if (is_sel) {
                 const row_h = ch * @as(f32, @floatFromInt(span));
                 self.fill(x + cw / 2, row_y, p.boxW() - cw, row_h, th.selection);
+                self.fill(x + cw / 2, row_y, self.hairline() * 3, row_h, th.ansi[4]);
+                _ = self.drawUiText("\u{203A}", x + cw / 2, self.uiTextY(row_y, ch), th.ansi[4]);
             }
 
             // Each column wraps inside itself, so neither can push the other
@@ -1078,6 +1100,14 @@ pub const Renderer = struct {
             }
             line += span;
         }
+
+        const footer_y = y + p.boxH() - ch;
+        _ = self.drawUiText(
+            "Type to filter   \u{2191}/\u{2193} navigate   Enter connect   Esc close",
+            x + cw,
+            self.uiTextY(footer_y, ch),
+            th.tab_inactive_fg,
+        );
     }
 
     /// Draws a context menu. `enabled` says which items can be chosen;
@@ -1168,8 +1198,8 @@ pub const Picker = struct {
     pub const MAX_ROWS: usize = 32;
     const BOX_COLS: u32 = 52;
     /// Title row plus padding above and below the list.
-    const CHROME_ROWS: usize = 4;
-    const FIRST_ROW: f32 = 2.0;
+    const CHROME_ROWS: usize = 5;
+    const FIRST_ROW: f32 = 3.0;
     /// Lines one entry may wrap onto before its name is simply cut short.
     const MAX_SPAN: usize = 3;
 
@@ -1178,7 +1208,9 @@ pub const Picker = struct {
     }
 
     pub fn boxW(self: Picker) f32 {
-        return @as(f32, @floatFromInt(BOX_COLS)) * self.cell_w;
+        const wanted = @as(f32, @floatFromInt(BOX_COLS)) * self.cell_w;
+        if (self.width <= self.cell_w * 2) return self.width;
+        return @min(wanted, self.width - self.cell_w * 2);
     }
 
     /// Width of the name column in interface cells, gutter included.
@@ -1799,7 +1831,7 @@ fn testPicker(count: usize) Picker {
 test "the picker box is centred and sized to its list" {
     const small = testPicker(3);
     try testing.expectEqual(@as(usize, 3), small.listLines());
-    try testing.expectEqual(@as(f32, 16 * 7), small.boxH()); // 3 rows + chrome
+    try testing.expectEqual(@as(f32, 16 * 8), small.boxH()); // 3 rows + chrome
     try testing.expectEqual((800 - small.boxW()) / 2, small.boxX());
 }
 

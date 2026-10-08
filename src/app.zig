@@ -105,6 +105,7 @@ pub const App = struct {
     menu: ?MenuState = null,
     picker: ?Picker = null,
     picker_rows: [ssh.MAX_HOSTS]rnd.HostRow = undefined,
+    picker_host_indices: [ssh.MAX_HOSTS]usize = undefined,
     toast: ?Toast = null,
 
     /// The host list is bounded, so it lives in the app rather than being
@@ -112,6 +113,12 @@ pub const App = struct {
     const Picker = struct {
         selected: usize = 0,
         count: usize = 0,
+        query: [64]u8 = undefined,
+        query_len: usize = 0,
+
+        fn queryText(self: *const Picker) []const u8 {
+            return self.query[0..self.query_len];
+        }
     };
 
     /// What the right-button menu offers. Ordered as the menu draws them.
@@ -530,8 +537,11 @@ pub const App = struct {
 
     fn onTextInput(self: *App, ev: sdl.TextInputEvent) void {
         if (self.text_gate.consumeText()) return;
-        if (self.picker != null) return;
         const text = ev.text orelse return;
+        if (self.picker != null) {
+            self.pickerText(std.mem.span(text));
+            return;
+        }
         const tab = self.tabs.active() orelse return;
         // Ordinary characters arrive here rather than as key presses, so this
         // is where typing invalidates what was highlighted.
@@ -1170,18 +1180,39 @@ pub const App = struct {
 
     fn openPicker(self: *App) void {
         if (self.picker != null) return;
+        self.picker = .{};
+        self.rebuildPickerRows();
+        if (self.picker.?.count == 0) self.showToast("no hosts in ~/.ssh/config", .{});
+    }
+
+    fn rebuildPickerRows(self: *App) void {
+        const p = &(self.picker.?);
         var usable: [ssh.MAX_HOSTS]ssh.Host = undefined;
         const hosts = self.hosts.connectable(&usable);
+        const query = p.queryText();
 
-        for (hosts, 0..) |h, i| {
-            self.picker_rows[i] = .{
+        var count: usize = 0;
+        for (hosts, 0..) |h, host_index| {
+            const detail = if (h.hostname.len > 0) h.hostname else h.user;
+            if (query.len > 0 and
+                !containsIgnoreCase(h.alias, query) and
+                !containsIgnoreCase(detail, query) and
+                !containsIgnoreCase(h.user, query)) continue;
+
+            self.picker_rows[count] = .{
                 .alias = h.alias,
                 // The arena backing these strings outlives the picker.
-                .detail = if (h.hostname.len > 0) h.hostname else h.user,
+                .detail = detail,
             };
+            self.picker_host_indices[count] = host_index;
+            count += 1;
         }
-        self.picker = .{ .count = hosts.len };
-        if (hosts.len == 0) self.showToast("no hosts in ~/.ssh/config", .{});
+        p.count = count;
+        if (count == 0) {
+            p.selected = 0;
+        } else if (p.selected >= count) {
+            p.selected = count - 1;
+        }
     }
 
     fn pickerRows(self: *const App) []const rnd.HostRow {
@@ -1195,18 +1226,48 @@ pub const App = struct {
 
     fn pickerKey(self: *App, key: u32) void {
         const p = &(self.picker.?);
+        var claimed = true;
         switch (key) {
-            sdl.SDLK_ESCAPE => self.closePicker(),
+            sdl.SDLK_ESCAPE => {
+                if (p.query_len > 0) {
+                    p.query_len = 0;
+                    self.rebuildPickerRows();
+                } else {
+                    self.closePicker();
+                }
+            },
+            sdl.SDLK_BACKSPACE => {
+                if (p.query_len > 0) {
+                    p.query_len = previousUtf8Start(p.query[0..p.query_len]);
+                    self.rebuildPickerRows();
+                }
+            },
             sdl.SDLK_UP => {
                 if (p.count > 0) p.selected = (p.selected + p.count - 1) % p.count;
             },
             sdl.SDLK_DOWN => {
                 if (p.count > 0) p.selected = (p.selected + 1) % p.count;
             },
+            sdl.SDLK_HOME => p.selected = 0,
+            sdl.SDLK_END => {
+                if (p.count > 0) p.selected = p.count - 1;
+            },
+            sdl.SDLK_PAGEUP => p.selected -|= @min(p.selected, 10),
+            sdl.SDLK_PAGEDOWN => {
+                if (p.count > 0) p.selected = @min(p.selected + 10, p.count - 1);
+            },
             sdl.SDLK_RETURN => self.connectSelected(),
-            else => {},
+            else => claimed = false,
         }
-        self.text_gate.claim();
+        if (claimed) self.text_gate.claim();
+    }
+
+    fn pickerText(self: *App, text: []const u8) void {
+        const p = &(self.picker.?);
+        if (text.len == 0 or text.len > p.query.len - p.query_len) return;
+        @memcpy(p.query[p.query_len..][0..text.len], text);
+        p.query_len += text.len;
+        self.rebuildPickerRows();
     }
 
     /// Opens the highlighted host in a new tab and dismisses the picker.
@@ -1217,9 +1278,11 @@ pub const App = struct {
 
         var usable: [ssh.MAX_HOSTS]ssh.Host = undefined;
         const hosts = self.hosts.connectable(&usable);
-        if (selected >= hosts.len) return;
+        if (selected >= p.count) return;
+        const host_index = self.picker_host_indices[selected];
+        if (host_index >= hosts.len) return;
 
-        _ = self.tabs.addSsh(hosts[selected], self.cols, self.rows) catch |err| {
+        _ = self.tabs.addSsh(hosts[host_index], self.cols, self.rows) catch |err| {
             self.showToast("ssh failed: {s}", .{@errorName(err)});
         };
     }
@@ -1306,7 +1369,14 @@ pub const App = struct {
         }
 
         if (self.picker) |p| {
-            self.renderer.drawHostPicker(self.pickerRows(), p.selected, th_, width, height);
+            self.renderer.drawHostPicker(
+                self.pickerRows(),
+                p.selected,
+                p.queryText(),
+                th_,
+                width,
+                height,
+            );
         }
         if (self.menu) |m| {
             const on = self.menuEnabled();
@@ -1380,6 +1450,42 @@ pub const App = struct {
 /// at all for keys that produce no text. A flag cleared only by a TEXT_INPUT
 /// therefore stays set after Enter or Ctrl+C and swallows the *next* character
 /// typed, which looks like keys needing several presses to register.
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    for (0..haystack.len - needle.len + 1) |start| {
+        var matches = true;
+        for (needle, 0..) |want, i| {
+            if (std.ascii.toLower(haystack[start + i]) != std.ascii.toLower(want)) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) return true;
+    }
+    return false;
+}
+
+fn previousUtf8Start(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    var at = text.len - 1;
+    while (at > 0 and text[at] & 0xc0 == 0x80) at -= 1;
+    return at;
+}
+
+test "SSH picker search is ASCII case insensitive" {
+    try std.testing.expect(containsIgnoreCase("Production-DB", "production"));
+    try std.testing.expect(containsIgnoreCase("deploy@example.com", "EXAMPLE"));
+    try std.testing.expect(!containsIgnoreCase("staging", "prod"));
+}
+
+test "SSH picker backspace removes one UTF-8 codepoint" {
+    try std.testing.expectEqual(@as(usize, 2), previousUtf8Start("abc"));
+    try std.testing.expectEqual(@as(usize, 1), previousUtf8Start("a\u{44F}"));
+    try std.testing.expectEqual(@as(usize, 0), previousUtf8Start("\u{44F}"));
+}
+
 pub const TextGate = struct {
     claimed: bool = false,
 

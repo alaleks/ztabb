@@ -50,18 +50,18 @@ pub const dark = Theme{
     .kind = .dark,
     .name = "gerry dark",
 
-    .bg = 0x1E2128,
+    .bg = 0x242B38,
     .fg = 0xCBD1DB,
     .cursor = 0xD8DDE5,
-    .cursor_text = 0x1E2128,
+    .cursor_text = 0x242B38,
     .selection = 0x425170,
 
-    .tab_bar_bg = 0x15181E,
-    .tab_active_bg = 0x262A32,
-    .tab_inactive_bg = 0x1A1E24,
+    .tab_bar_bg = 0x1B222E,
+    .tab_active_bg = 0x2C3442,
+    .tab_inactive_bg = 0x202834,
     .tab_active_fg = 0xE3E7ED,
     .tab_inactive_fg = 0x8992A0,
-    .tab_border = 0x0F1216,
+    .tab_border = 0x151C26,
 
     .ansi = .{
         0x333740, 0xE06C77, 0x8FBF7F, 0xD9B072,

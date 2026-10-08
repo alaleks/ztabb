@@ -105,6 +105,18 @@ pub fn indexOf(cp: u21) ?usize {
     for (data.ranges) |r| {
         if (cp >= r.lo and cp <= r.hi) return r.base + (cp - r.lo);
     }
+
+    // Agnoster uses these bent arrows for branches ahead of or behind their
+    // upstream. The baked face stops at U+21AF, so preserve their direction
+    // with the nearest covered arrows instead of showing a replacement box.
+    const fallback: u21 = switch (cp) {
+        0x21B0 => 0x2196,
+        0x21B1 => 0x2197,
+        else => return null,
+    };
+    for (data.ranges) |r| {
+        if (fallback >= r.lo and fallback <= r.hi) return r.base + (fallback - r.lo);
+    }
     return null;
 }
 
@@ -409,7 +421,7 @@ test "Powerline and prompt-theme symbols are covered" {
         try testing.expect(indexOf(cp) != null);
         for (0..section_count) |i| try testing.expect(!isBlank(cp, sectionAt(i)));
     }
-    for ([_]u21{ 0x00B1, 0x2691, 0x2699, 0x26A1, 0x2718, 0x271A, 0x272D, 0x27A6 }) |cp| {
+    for ([_]u21{ 0x00B1, 0x21B0, 0x21B1, 0x2691, 0x2699, 0x26A1, 0x2718, 0x271A, 0x272D, 0x27A6 }) |cp| {
         try testing.expect(indexOf(cp) != null);
         try testing.expect(!isBlank(cp, termSize(default_points, 2, .regular)));
     }
