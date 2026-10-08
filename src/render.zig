@@ -746,26 +746,28 @@ pub const Renderer = struct {
             const budget: u32 = @intFromFloat(@max(0, (room - spin_room) / self.uiCellW()));
             const label_y = self.uiTextY(top, bar_h);
 
-            // A name the pointer is resting on scrolls, so the whole of it can
-            // be read without opening the tab. Only that one: a bar of names
-            // all sliding at once is a thing to look away from, and nothing
-            // moves unless it is being asked to.
-            // Not while it is connecting: the spinner has just taken room, and
-            // a name that slides the moment a tab is opened is the one time
-            // this is unwelcome rather than useful.
-            if (hover == i and !tab.connecting and marqueeSpan(tab.labelParts()) > budget) {
-                _ = self.drawMarquee(tab.labelParts(), label_x, label_y, budget, fg, now_ms);
-                continue;
-            }
-
-            const label_end = self.drawTabLabel(
-                tab.labelParts(),
-                label_x,
-                label_y,
+            // A scrolling name and a cut one are two ways of drawing the same
+            // label, so both go through here and whatever follows a label is
+            // reached either way. Scrolling used to `continue` instead, which
+            // skipped the rest of the loop and took the close button with it:
+            // a tab lost its cross exactly while the pointer was on it, which
+            // is the one moment it is wanted.
+            const label_end = if (labelScrolls(
+                hover == i,
+                tab.connecting,
+                marqueeSpan(tab.labelParts()),
                 budget,
-                fg,
-                th.tab_inactive_fg,
-            );
+            ))
+                self.drawMarquee(tab.labelParts(), label_x, label_y, budget, fg, now_ms)
+            else
+                self.drawTabLabel(
+                    tab.labelParts(),
+                    label_x,
+                    label_y,
+                    budget,
+                    fg,
+                    th.tab_inactive_fg,
+                );
 
             if (tab.connecting) {
                 // The ring the mark turns on is the text's own colour, taken
@@ -1566,6 +1568,23 @@ fn cellLen(s: []const u8) u32 {
 }
 
 /// How many cells a label wants if nothing is cut from it.
+/// Whether a tab's name scrolls along rather than being cut short.
+///
+/// Only the one under the pointer, and only while it does not fit: a bar of
+/// names all sliding at once is a thing to look away from, and nothing moves
+/// unless it is being asked to. Not while the tab is connecting either -- the
+/// spinner has just taken room from the label, so the name becomes too long at
+/// the very moment the tab is opened, which is the one time the movement is
+/// unwelcome rather than useful.
+///
+/// One function because two places ask: the bar, to draw it, and the window,
+/// to know it must keep drawing frames. Answering differently would either
+/// freeze a name mid-slide or burn frames on one that is not moving.
+pub fn labelScrolls(hovered: bool, connecting: bool, span: u32, budget: u32) bool {
+    if (!hovered or connecting) return false;
+    return span > budget;
+}
+
 pub fn marqueeSpan(parts: tabs_mod.Tab.Label) u32 {
     var n = cellLen(parts.prefix) + cellLen(parts.name);
     if (parts.suffix.len > 0) n += 1 + cellLen(parts.suffix);
@@ -2504,4 +2523,17 @@ test "shellLineOverlay tolerates a colour buffer shorter than the line" {
     var color_buf: [4]u32 = undefined;
     const o = shellLineOverlay(&t, &theme.dark, &text_buf, &color_buf).?;
     try testing.expect(o.colors.len <= 4);
+}
+
+test "only the hovered tab scrolls, and not while it is connecting" {
+    // Resting on a tab whose name does not fit is the whole trigger.
+    try testing.expect(labelScrolls(true, false, 30, 20));
+    // A name that fits never moves, however long it is rested on.
+    try testing.expect(!labelScrolls(true, false, 20, 20));
+    try testing.expect(!labelScrolls(true, false, 10, 20));
+    // Nor does one nobody is pointing at.
+    try testing.expect(!labelScrolls(false, false, 30, 20));
+    // Nor one still waiting on its connection: the spinner has just taken the
+    // room that made it too long.
+    try testing.expect(!labelScrolls(true, true, 30, 20));
 }

@@ -920,10 +920,16 @@ pub const App = struct {
     fn marqueeRunning(self: *App) bool {
         const i = self.hover_tab orelse return false;
         if (i >= self.tabs.count) return false;
-        // The bar does not scroll a tab that is still connecting, so nothing
-        // here should keep asking for frames on its behalf.
-        if (self.tabs.items[i].connecting) return false;
-        return rnd.marqueeSpan(self.tabs.items[i].labelParts()) > self.labelBudget();
+        const tab = &self.tabs.items[i];
+        // The same rule the bar draws by, asked rather than restated: a copy
+        // here would eventually disagree, and then a name would freeze
+        // mid-slide or frames would be drawn for one that is not moving.
+        return rnd.labelScrolls(
+            true,
+            tab.connecting,
+            rnd.marqueeSpan(tab.labelParts()),
+            self.labelBudget(),
+        );
     }
 
     /// Cells a tab's name has to sit in, which is what decides whether it has
