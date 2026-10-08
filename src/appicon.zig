@@ -6,8 +6,8 @@
 //! distance fields the interface icons use, so every size is drawn at its own
 //! resolution and the result is sharp wherever the system puts it.
 //!
-//! The shape follows the platform's own: a rounded square ("squircle") filled
-//! with a diagonal gradient, carrying a prompt in white.
+//! The shape follows the platform's own rounded square, with a single large
+//! prompt that stays recognizable at Dock and list sizes.
 
 const std = @import("std");
 
@@ -17,16 +17,11 @@ const CORNER: f32 = 0.225;
 /// neighbouring icons in the Dock do not touch.
 const INSET: f32 = 0.06;
 
-/// The ground, top-left to bottom-right: the terminal's own dark, lifted a
-/// little at the top so the square reads as a surface rather than a hole.
-const GRAD_FROM: [3]f32 = .{ 0x37, 0x3C, 0x47 };
-const GRAD_TO: [3]f32 = .{ 0x23, 0x27, 0x2E };
-/// The prompt. Bright enough to carry at 16px against that ground, which is
-/// the whole job of the mark.
-const MARK: [3]f32 = .{ 0x4F, 0xE0, 0xC4 };
-/// A hairline along the top edge, so the icon does not dissolve into a dark
-/// Dock the way a flat dark square does.
-const RIM: [3]f32 = .{ 0x4E, 0x56, 0x62 };
+const GRAD_FROM: [3]f32 = .{ 0x30, 0x31, 0x66 };
+const GRAD_TO: [3]f32 = .{ 0x11, 0x1D, 0x32 };
+const PROMPT: [3]f32 = .{ 0xED, 0xFA, 0xFF };
+const CURSOR: [3]f32 = .{ 0x68, 0xEC, 0xD1 };
+const RIM: [3]f32 = .{ 0x69, 0x72, 0xA6 };
 
 const Point = struct { x: f32, y: f32 };
 
@@ -44,9 +39,9 @@ fn segmentDistance(px: f32, py: f32, a: Point, b: Point) f32 {
     return std.math.hypot(px - (a.x + t * vx), py - (a.y + t * vy));
 }
 
-fn roundedBoxDistance(px: f32, py: f32, half: f32, radius: f32) f32 {
-    const qx = @abs(px) - half + radius;
-    const qy = @abs(py) - half + radius;
+fn roundedRectDistance(px: f32, py: f32, half_x: f32, half_y: f32, radius: f32) f32 {
+    const qx = @abs(px) - half_x + radius;
+    const qy = @abs(py) - half_y + radius;
     return std.math.hypot(@max(qx, 0), @max(qy, 0)) + @min(@max(qx, qy), 0) - radius;
 }
 
@@ -61,11 +56,18 @@ const chevron_b = p(0.285, 0.655);
 const rule_a = p(0.545, 0.655);
 const rule_b = p(0.735, 0.655);
 
-fn markDistance(x: f32, y: f32, cursor: bool) f32 {
+fn markDistance(x: f32, y: f32) f32 {
     var d = segmentDistance(x, y, chevron_a, chevron_tip);
     d = @min(d, segmentDistance(x, y, chevron_tip, chevron_b));
-    if (cursor) d = @min(d, segmentDistance(x, y, rule_a, rule_b));
     return d - stroke_w / 2;
+}
+
+fn cursorDistance(x: f32, y: f32) f32 {
+    return segmentDistance(x, y, rule_a, rule_b) - stroke_w / 2;
+}
+
+fn mix(rgb: *[3]f32, color: [3]f32, amount: f32) void {
+    for (rgb, color) |*channel, target| channel.* += (target - channel.*) * amount;
 }
 
 fn coverage(distance: f32, feather: f32) f32 {
@@ -101,24 +103,28 @@ pub fn renderFrame(size: u32, cursor: bool, out: []u32) void {
         for (0..size) |xi| {
             const x = (@as(f32, @floatFromInt(xi)) + 0.5) / fsize;
 
-            const body = coverage(roundedBoxDistance(x - 0.5, y - 0.5, half, radius), feather);
+            const body = coverage(roundedRectDistance(x - 0.5, y - 0.5, half, half, radius), feather);
             if (body <= 0) {
                 out[yi * size + xi] = 0;
                 continue;
             }
 
-            // Diagonal sweep, so the light falls the way macOS artwork does.
+            // The blue-violet corner gives the small silhouette a distinctive
+            // hue while the lower right stays as dark as a terminal screen.
             var rgb = gradientAt((x + y) / 2);
+            const glow = std.math.clamp(1 - std.math.hypot(x - 0.21, y - 0.16) / 0.65, 0, 1);
+            mix(&rgb, .{ 0x52, 0x47, 0xAA }, glow * 0.26);
 
-            // The rim rides the outer edge of the rounded square.
-            const edge = roundedBoxDistance(x - 0.5, y - 0.5, half, radius);
+            const edge = roundedRectDistance(x - 0.5, y - 0.5, half, half, radius);
             const rim = std.math.clamp(1 + edge / (2.5 / fsize), 0, 1) * body;
-            for (&rgb, RIM) |*c, rim_c| c.* += (rim_c - c.*) * rim;
+            mix(&rgb, RIM, rim * 0.8);
 
-            const mark = coverage(markDistance(x, y, cursor), feather);
-            var r = rgb[0] + (MARK[0] - rgb[0]) * mark;
-            var g = rgb[1] + (MARK[1] - rgb[1]) * mark;
-            var b = rgb[2] + (MARK[2] - rgb[2]) * mark;
+            const mark = coverage(markDistance(x, y), feather);
+            mix(&rgb, PROMPT, mark);
+            if (cursor) mix(&rgb, CURSOR, coverage(cursorDistance(x, y), feather));
+            var r = rgb[0];
+            var g = rgb[1];
+            var b = rgb[2];
             r = std.math.clamp(r, 0, 255);
             g = std.math.clamp(g, 0, 255);
             b = std.math.clamp(b, 0, 255);
@@ -254,7 +260,7 @@ test "the ground is as dark as the terminal's own" {
     const px = renderAt(size, buf);
 
     // Sampled inside the body, away from the mark and the rim.
-    const ground = px[(size / 4) * size + size / 2];
+    const ground = px[(size / 2) * size + size * 3 / 4];
     try testing.expect(luminance(ground) < 0.06);
 }
 
@@ -274,7 +280,7 @@ test "the mark carries against the ground" {
     }.f;
 
     const mark = at(px, size, 0.47, 0.5);
-    const ground = at(px, size, 0.5, 0.25);
+    const ground = at(px, size, 0.75, 0.5);
     const ratio = (luminance(mark) + 0.05) / (luminance(ground) + 0.05);
     // Well past the 4.5:1 that counts as readable, because at 16px the mark
     // is a few pixels wide and has nothing else to help it.
@@ -314,7 +320,7 @@ test "the prompt stands out from the body" {
 
     const on_mark = at(px, size, 0.47, 0.5);
     const on_rule = at(px, size, 0.63, 0.655);
-    const body = at(px, size, 0.5, 0.25);
+    const body = at(px, size, 0.75, 0.5);
     try testing.expect(lumaOf(on_mark) > lumaOf(body) * 2);
     try testing.expect(lumaOf(on_rule) > lumaOf(body) * 2);
 }
@@ -327,9 +333,9 @@ test "the mark stays legible at list size" {
     defer gpa.free(buf);
     const px = renderAt(size, buf);
 
-    // Count what stands clearly off the ground rather than an absolute
-    // brightness: the mark is a bright teal, not white.
-    const ground = lumaOf(px[(size / 4) * size + size / 2]);
+    // Count what stands clearly off the ground rather than using an absolute
+    // brightness: the mark has white and mint parts.
+    const ground = lumaOf(px[(size / 2) * size + size * 3 / 4]);
     var bright: usize = 0;
     for (px) |v| {
         if (alphaOf(v) > 128 and lumaOf(v) > ground * 2) bright += 1;
