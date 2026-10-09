@@ -466,6 +466,18 @@ pub const App = struct {
             }
         }
 
+        // A pane whose ssh dropped has no one to type to; it answers only
+        // to the two choices its notice offers.
+        if (tab.active().lost) {
+            if (!ev.repeat) switch (key) {
+                sdl.SDLK_RETURN => self.reconnect(),
+                sdl.SDLK_ESCAPE => self.run_action(.close_pane),
+                else => {},
+            };
+            self.text_gate.claim();
+            return;
+        }
+
         var buf: [16]u8 = undefined;
         const bytes = encodeKey(key, mods, &buf) orelse return;
         if (bytes.len == 0) return;
@@ -543,6 +555,7 @@ pub const App = struct {
             return;
         }
         const tab = self.tabs.active() orelse return;
+        if (tab.active().lost) return;
         // Ordinary characters arrive here rather than as key presses, so this
         // is where typing invalidates what was highlighted.
         tab.active().terminal.scrollToBottom();
@@ -1288,9 +1301,18 @@ pub const App = struct {
         const host_index = self.picker_host_indices[selected];
         if (host_index >= hosts.len) return;
 
-        _ = self.tabs.addSsh(hosts[host_index], self.cols, self.rows) catch |err| {
+        var host = hosts[host_index];
+        host.keepalive = self.hosts.keepaliveFor(host.alias);
+        _ = self.tabs.addSsh(host, self.cols, self.rows) catch |err| {
             self.showToast("ssh failed: {s}", .{@errorName(err)});
         };
+    }
+
+    fn reconnect(self: *App) void {
+        self.tabs.reconnectActive() catch |err| {
+            self.showToast("ssh failed: {s}", .{@errorName(err)});
+        };
+        self.ui_dirty = true;
     }
 
     // -- toast -------------------------------------------------------------

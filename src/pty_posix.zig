@@ -242,6 +242,15 @@ pub const Pty = struct {
         return self.reap(0);
     }
 
+    /// The child's exit code, or null while it runs or when a signal ended it.
+    pub fn exitCode(self: *const Pty) ?u8 {
+        if (!self.exited) return null;
+        // WIFEXITED: the low seven bits are the terminating signal, zero for a
+        // normal exit; the code itself sits in the next byte.
+        if (self.exit_status & 0x7f != 0) return null;
+        return @truncate(self.exit_status >> 8);
+    }
+
     /// Hangs the child up and reaps it, without ever blocking indefinitely.
     ///
     /// Closing the master is the hang-up a real terminal performs, and a shell

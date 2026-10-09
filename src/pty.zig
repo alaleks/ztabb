@@ -188,6 +188,19 @@ test "poll reports a finished child" {
     try testing.expect(exited);
 }
 
+test "the exit code comes back, which is how a dropped ssh is told from exit" {
+    if (!posix_only) return error.SkipZigTest;
+    const argv = [_][*:0]const u8{ "/bin/sh", "-c", "exit 255" };
+    var pty = try Pty.spawn(&argv, &.{}, 80, 24);
+    defer pty.close();
+    try testing.expectEqual(@as(?u8, null), pty.exitCode());
+    for (0..POLL_TURNS) |_| {
+        if (pty.poll()) break;
+        sleepMs(POLL_MS);
+    }
+    try testing.expectEqual(@as(?u8, 255), pty.exitCode());
+}
+
 /// Reads until `want` shows up or the turns run out. Windows echoes through a
 /// console host, so what comes back arrives in pieces and carries escape
 /// sequences around it; only the presence of the text is asserted.

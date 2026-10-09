@@ -19,6 +19,9 @@ pub const Host = struct {
     port: u16 = 22,
     /// True for patterns such as `Host *` that cannot be connected to directly.
     is_pattern: bool = false,
+    /// The block sets `ServerAliveInterval`. ztabb then leaves keepalives to
+    /// the config instead of supplying its own.
+    keepalive: bool = false,
 
     /// The argument vector for connecting to this host.
     ///
@@ -56,6 +59,18 @@ pub const Config = struct {
         }
         std.mem.sort(Host, out[0..n], {}, aliasBefore);
         return out[0..n];
+    }
+
+    /// Whether the config sets `ServerAliveInterval` for `alias`: in its own
+    /// block, in a pattern that matches it, or before the first `Host`.
+    pub fn keepaliveFor(self: *const Config, alias: []const u8) bool {
+        for (self.hosts) |h| {
+            if (!h.keepalive) continue;
+            if (h.is_pattern) {
+                if (wildcardMatch(h.alias, alias)) return true;
+            } else if (std.mem.eql(u8, h.alias, alias)) return true;
+        }
+        return false;
     }
 
     /// Case-insensitive, so `Web` and `web` sort together rather than the
@@ -119,6 +134,17 @@ pub fn parseText(
                 });
             }
             block_start = if (out.items.len > first) first else null;
+            continue;
+        }
+
+        if (std.ascii.eqlIgnoreCase(key, "serveraliveinterval")) {
+            if (block_start) |first| {
+                for (out.items[first..]) |*host| host.keepalive = true;
+            } else if (out.items.len < MAX_HOSTS) {
+                // Before any Host it is a global default, which is what an
+                // implicit `Host *` means.
+                try out.append(a, .{ .alias = "*", .is_pattern = true, .keepalive = true });
+            }
             continue;
         }
 
@@ -429,7 +455,7 @@ test "directives before the first Host block are dropped" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const hosts = try parseForTest(arena.allocator(),
-        \\ServerAliveInterval 60
+        \\Compression yes
         \\Host after
         \\  User u
     );
@@ -512,6 +538,38 @@ test "sorting survives more hosts than the caller's buffer" {
     try testing.expectEqual(@as(usize, 2), usable.len);
     try testing.expectEqualStrings("c", usable[0].alias);
     try testing.expectEqualStrings("d", usable[1].alias);
+}
+
+test "keepaliveFor finds ServerAliveInterval in the block, a pattern, or the globals" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const own = Config{ .arena = undefined, .hosts = try parseForTest(a,
+        \\Host web
+        \\  ServerAliveInterval 30
+        \\Host db
+        \\  HostName db.local
+    ) };
+    try testing.expect(own.keepaliveFor("web"));
+    try testing.expect(!own.keepaliveFor("db"));
+
+    const pattern = Config{ .arena = undefined, .hosts = try parseForTest(a,
+        \\Host prod-*
+        \\  ServerAliveInterval 0
+        \\Host prod-api dev
+    ) };
+    try testing.expect(pattern.keepaliveFor("prod-api"));
+    try testing.expect(!pattern.keepaliveFor("dev"));
+
+    const global = Config{ .arena = undefined, .hosts = try parseForTest(a,
+        \\ServerAliveInterval=15
+        \\Host box
+    ) };
+    try testing.expect(global.keepaliveFor("box"));
+    var usable: [MAX_HOSTS]Host = undefined;
+    // The implicit `*` it creates is a pattern, so the picker never lists it.
+    try testing.expectEqual(@as(usize, 1), global.connectable(&usable).len);
 }
 
 test "command yields a null-terminated alias" {

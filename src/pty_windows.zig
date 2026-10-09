@@ -562,6 +562,14 @@ pub const Pty = struct {
         return true;
     }
 
+    /// The child's exit code, or null while it runs. Windows has no signals,
+    /// so a code is always there once the process is gone; wider ones are
+    /// clipped, which is how a POSIX shell would report them too.
+    pub fn exitCode(self: *const Pty) ?u8 {
+        if (!self.exited) return null;
+        return @truncate(self.exit_status);
+    }
+
     /// Hangs the child up and tears the console down, without ever blocking
     /// indefinitely.
     ///

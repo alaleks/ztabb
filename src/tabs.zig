@@ -17,12 +17,59 @@ pub const Kind = enum { shell, ssh };
 pub const Pane = struct {
     pty: pty.Pty,
     terminal: term.Terminal,
+    /// Set on the pane an ssh tab was opened with, so a dropped connection
+    /// can be dialled again into the same history.
+    remote: ?Remote = null,
+    /// ssh gave up on the connection. The pane stays, with its history and a
+    /// note saying so, until it is reconnected or closed.
+    lost: bool = false,
 
     fn close(self: *Pane) void {
         self.pty.close();
         self.terminal.deinit();
     }
 };
+
+/// What it takes to run `ssh` for a host again.
+pub const Remote = struct {
+    alias: [ssh.MAX_FIELD:0]u8 = @splat(0),
+    /// The user's config sets `ServerAliveInterval` for this host.
+    keepalive: bool,
+
+    pub fn init(host: ssh.Host) error{NameTooLong}!Remote {
+        var r = Remote{ .keepalive = host.keepalive };
+        _ = try host.command(&r.alias);
+        return r;
+    }
+};
+
+/// ssh's exit code for "the connection failed or dropped", as opposed to the
+/// remote shell's own status passed back through it.
+const SSH_CONNECTION_LOST: u8 = 255;
+
+/// Without keepalives a dead network leaves ssh waiting on TCP for many
+/// minutes, so it never exits and nothing can notice. 15s x 3 notices in 45.
+const KEEPALIVE_ARGS = [_][*:0]const u8{ "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3" };
+
+const LOST_NOTICE = "\r\n\x1b[0;2m[connection lost \xe2\x80\x94 Enter: reconnect, Esc: close]\x1b[0m\r\n";
+
+fn spawnSsh(remote: *const Remote, cols: u16, rows: u16) pty.SpawnError!pty.Pty {
+    var argv: [2 + KEEPALIVE_ARGS.len][*:0]const u8 = undefined;
+    var n: usize = 0;
+    argv[n] = "ssh";
+    n += 1;
+    // The config wins when it has a say; ssh would let `-o` override it.
+    if (!remote.keepalive) {
+        for (KEEPALIVE_ARGS) |arg| {
+            argv[n] = arg;
+            n += 1;
+        }
+    }
+    argv[n] = &remote.alias;
+    n += 1;
+    const env = [_][*:0]const u8{ "TERM=xterm-256color", "COLORTERM=truecolor" };
+    return pty.Pty.spawn(argv[0..n], &env, cols, rows);
+}
 
 pub const Tab = struct {
     slots: [panes.MAX_PANES]?Pane = @splat(null),
@@ -252,13 +299,11 @@ pub const Tabs = struct {
         const c: u16 = @intCast(@min(cols, std.math.maxInt(u16)));
         const r: u16 = @intCast(@min(rows, std.math.maxInt(u16)));
 
-        var p = if (host) |h| blk: {
-            var name_buf: [ssh.MAX_FIELD:0]u8 = undefined;
-            const alias = h.command(&name_buf) catch return error.InvalidIndex;
-            const argv = [_][*:0]const u8{ "ssh", alias };
-            const env = [_][*:0]const u8{ "TERM=xterm-256color", "COLORTERM=truecolor" };
-            break :blk try pty.Pty.spawn(&argv, &env, c, r);
-        } else try pty.Pty.spawnShell(c, r);
+        const remote: ?Remote = if (host) |h|
+            Remote.init(h) catch return error.InvalidIndex
+        else
+            null;
+        var p = if (remote) |*rm| try spawnSsh(rm, c, r) else try pty.Pty.spawnShell(c, r);
         // The pty owns a live child process; if the screen fails to allocate it
         // must be torn down rather than left running headless.
         errdefer p.close();
@@ -274,7 +319,7 @@ pub const Tabs = struct {
             .label = @splat(0),
             .label_len = 0,
         };
-        self.items[self.count].slots[0] = .{ .pty = p, .terminal = t };
+        self.items[self.count].slots[0] = .{ .pty = p, .terminal = t, .remote = remote };
         self.items[self.count].setLabel(name);
 
         const idx = self.count;
@@ -539,7 +584,16 @@ pub const Tabs = struct {
             var emptied = false;
             for (self.items[i].paneIds(&ids)) |id| {
                 const p = self.items[i].pane(id) orelse continue;
-                if (!p.pty.poll()) continue;
+                if (p.lost or !p.pty.poll()) continue;
+                // A dropped connection keeps its pane: the history is what the
+                // user was looking at, and Enter brings the session back.
+                if (p.remote != null and p.pty.exitCode() == SSH_CONNECTION_LOST) {
+                    p.lost = true;
+                    p.terminal.scrollToBottom();
+                    p.terminal.write(LOST_NOTICE);
+                    self.items[i].connecting = false;
+                    continue;
+                }
                 if (self.closePane(i, id)) |_| {} else emptied = true;
             }
             if (emptied) {
@@ -596,6 +650,26 @@ pub const Tabs = struct {
             self.layoutTab(tab);
         }
         return survivor;
+    }
+
+    /// Dials the focused pane's ssh host again, in place, keeping its history.
+    /// Does nothing unless that pane lost its connection.
+    pub fn reconnectActive(self: *Tabs) Error!void {
+        const tab = self.active() orelse return error.NoTabs;
+        const p = tab.active();
+        if (!p.lost) return;
+        const remote = if (p.remote) |*rm| rm else return;
+        const fresh = try spawnSsh(
+            remote,
+            @intCast(@min(p.terminal.cols, std.math.maxInt(u16))),
+            @intCast(@min(p.terminal.rows, std.math.maxInt(u16))),
+        );
+        // Closed only now: until the new child is up, the old descriptor is
+        // what keeps the pane's reads failing harmlessly.
+        p.pty.close();
+        p.pty = fresh;
+        p.lost = false;
+        tab.connecting = true;
     }
 
     /// Closes the focused pane of the active tab, and the tab with it when
@@ -1366,4 +1440,70 @@ test "a paste past the drop threshold reaches the child whole" {
     // tty's are both on their way, and whichever lags, nothing was dropped.
     const sent_xs = payload.len - newlines;
     try testing.expect(seen >= sent_xs);
+}
+
+/// Opens a tab that behaves like an ssh tab whose `ssh` exits with `code`.
+fn addExitingRemote(tabs: *Tabs, comptime code: []const u8) !void {
+    _ = try addTestTab(tabs, "remote", 80, 24);
+    const p = tabs.items[0].active();
+    p.pty.close();
+    const argv = [_][*:0]const u8{ "/bin/sh", "-c", "exit " ++ code };
+    p.pty = try pty.Pty.spawn(&argv, &.{}, 80, 24);
+    p.remote = try Remote.init(.{ .alias = "ztabb-test-nonexistent", .keepalive = true });
+    tabs.items[0].kind = .ssh;
+}
+
+fn reapUntil(tabs: *Tabs, done: *const fn (*Tabs) bool) void {
+    for (0..200) |_| {
+        _ = tabs.reapExited();
+        if (done(tabs)) return;
+        nap.ms(10);
+    }
+}
+
+test "a dropped ssh keeps its pane and comes back on reconnect" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    try addExitingRemote(&tabs, "255");
+
+    reapUntil(&tabs, struct {
+        fn f(t: *Tabs) bool {
+            return t.items[0].active().lost;
+        }
+    }.f);
+    try testing.expectEqual(@as(usize, 1), tabs.count);
+    const p = tabs.items[0].active();
+    try testing.expect(p.lost);
+    try testing.expect(screenHas(&p.terminal, "connection lost"));
+    // A second pass must not write the notice again.
+    _ = tabs.reapExited();
+
+    try tabs.reconnectActive();
+    try testing.expect(!tabs.items[0].active().lost);
+    try testing.expect(tabs.items[0].connecting);
+}
+
+test "an ssh that exits normally still closes its tab" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    try addExitingRemote(&tabs, "0");
+
+    reapUntil(&tabs, struct {
+        fn f(t: *Tabs) bool {
+            return t.count == 0;
+        }
+    }.f);
+    try testing.expectEqual(@as(usize, 0), tabs.count);
+}
+
+test "reconnect leaves a live pane alone" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "live", 80, 24);
+    const before = tabs.items[0].active().pty;
+    try tabs.reconnectActive();
+    try testing.expectEqual(before.cols, tabs.items[0].active().pty.cols);
+    try testing.expect(!tabs.items[0].connecting);
 }
