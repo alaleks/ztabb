@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>A fast, tiny terminal in one native process.</b><br>
-  0.1 % CPU at idle · 8.6 MB on disk · no Electron, no runtime.<br>
+  0.1 % CPU at idle · about 10 MB on disk · no Electron, no SDL3 install.<br>
   macOS · Linux · Windows
 </p>
 
@@ -40,13 +40,16 @@ Grab a file from the [latest release](https://github.com/alaleks/ztabb/releases/
 | `ztabb-aarch64-macos.zip`   | macOS, Apple Silicon (.app) |
 | `ztabb-x86_64-macos.zip`    | macOS, Intel (.app)         |
 | `ztabb-x86_64-linux.tar.gz` | Linux x86_64                |
+| `ztabb-x86_64-windows.zip`  | Windows x86_64              |
 
-- **macOS:** move `ztabb.app` to `/Applications`. SDL3 is bundled. The app is
-  ad-hoc signed, so on first launch right-click → **Open**, or run
+- **macOS:** move `ztabb.app` to `/Applications`. SDL3 is linked into its
+  executable. The app is ad-hoc signed, so on first launch right-click →
+  **Open**, or run
   `xattr -dr com.apple.quarantine /Applications/ztabb.app`.
-- **Linux:** needs SDL3 from your distribution (`libsdl3-0`, `sdl3`, …) —
-  `tools/install-sdl3-linux.sh` can fetch it.
-- **Windows:** no binary yet; [build from source](#build-from-source).
+- **Linux:** the executable includes SDL3; no separate SDL3 installation is
+  needed for releases built from this source. Older releases may still need it.
+- **Windows:** unpack the zip and run `ztabb.exe`. Older releases may contain
+  `SDL3.dll` beside it; releases built from this source include SDL3 in the exe.
 
 </details>
 
@@ -68,13 +71,12 @@ Grab a file from the [latest release](https://github.com/alaleks/ztabb/releases/
 
 Measured on Apple Silicon against Tabby running alongside:
 
-|                    | ztabb          | Tabby               |
-| ------------------ | -------------- | ------------------- |
-| Idle CPU           | **0.1 %**      | 14.3 %              |
-| Memory             | **110 MB**     | 459 MB              |
-| Processes          | **1**          | 5                   |
-| On disk            | **8.6 MB**     | 379 MB              |
-| Runtime dependency | **SDL3, libc** | Electron / Chromium |
+|           | ztabb      | Tabby  |
+| --------- | ---------- | ------ |
+| Idle CPU  | **0.1 %**  | 14.3 % |
+| Memory    | **110 MB** | 459 MB |
+| Processes | **1**      | 5      |
+| On disk   | **≈10 MB** | 379 MB |
 
 A rough comparison, not a benchmark. Most of the 110 MB is the SDL window and
 Metal renderer themselves (88 MB empty); ztabb's own share is about 23 MB.
@@ -109,17 +111,35 @@ stays with the shell.
 
 ## Build from source
 
-Requires **Zig 0.17.0** and **SDL3** (`brew install sdl3`).
+Requires **Zig 0.17.0**. For a quick local build, install SDL3 first
+(`brew install sdl3` on macOS; `sh tools/install-sdl3-linux.sh` on Linux):
 
 ```sh
-zig build run                         # build and run
-zig build test                        # unit tests
-zig build bundle -Doptimize=ReleaseFast && cp -R zig-out/ztabb.app /Applications/   # macOS app
+zig build run
+zig build test
 ```
 
-- **Linux:** `tools/install-sdl3-linux.sh`, then `zig build`.
-- **Windows:** `vcpkg install sdl3:x64-windows`, then
-  `zig build -Dsdl3=<vcpkg>/installed/x64-windows`.
+For a macOS or Linux executable that includes SDL3, install Git, CMake and
+Ninja. On Debian or Ubuntu, also install the X11 and Wayland development
+packages used by the release build:
+
+```sh
+sudo apt-get install -y libx11-dev libxext-dev libwayland-dev \
+  wayland-protocols libxkbcommon-dev libegl1-mesa-dev
+```
+
+An installed SDL3 is not needed for this build:
+
+```sh
+sh tools/build-static-sdl3.sh
+zig build -Doptimize=ReleaseFast -Dsdl3-static=zig-out/sdl3-static/lib/libSDL3.a
+```
+
+On macOS, package that executable as an app with
+`zig build bundle -Doptimize=ReleaseFast -Dsdl3-static=zig-out/sdl3-static/lib/libSDL3.a`.
+
+On Windows, use `vcpkg install sdl3:x64-windows-static`, then
+`zig build -Dsdl3-static=<vcpkg>/installed/x64-windows-static/lib/SDL3-static.lib`.
 
 <details>
 <summary>Artwork and typeface</summary>
@@ -150,4 +170,5 @@ cc -O2 -o /tmp/genfont tools/genfont.c -lm \
 
 MIT — see `LICENSE` — except `src/font.dat`, `src/font_data.zig` and the glyph
 data compiled from them, which are derived from JetBrains Mono and are
-**OFL 1.1**. See `NOTICE` and `licenses/JetBrainsMono-OFL.txt`.
+**OFL 1.1**. Release binaries also include SDL3 under its own licence.
+See `NOTICE`, `licenses/JetBrainsMono-OFL.txt` and `licenses/SDL3.txt`.

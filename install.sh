@@ -178,12 +178,6 @@ install_linux() {
         *) say "Note: $bindir is not on your PATH." ;;
     esac
 
-    # The Linux build links the system SDL3 rather than carrying its own.
-    if command -v ldd >/dev/null 2>&1 && ! ldd "$bindir/ztabb" 2>/dev/null | grep -q 'libSDL3.*=> /'; then
-        say ""
-        say "SDL3 does not look installed, and this build links the system copy."
-        say "Install it with your package manager (libsdl3-0, sdl3, or similar)."
-    fi
 }
 
 # -- helpers ----------------------------------------------------------------

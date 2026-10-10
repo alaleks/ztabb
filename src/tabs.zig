@@ -48,8 +48,9 @@ pub const Remote = struct {
 const SSH_CONNECTION_LOST: u8 = 255;
 
 /// Without keepalives a dead network leaves ssh waiting on TCP for many
-/// minutes, so it never exits and nothing can notice. 15s x 3 notices in 45.
-const KEEPALIVE_ARGS = [_][*:0]const u8{ "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3" };
+/// minutes. OpenSSH's default count of three detects a failed connection in
+/// about 90 seconds; a count from the user's config still takes precedence.
+const KEEPALIVE_ARGS = [_][*:0]const u8{ "-o", "ServerAliveInterval=30" };
 
 const LOST_NOTICE = "\r\n\x1b[0;2m[connection lost \xe2\x80\x94 Enter: reconnect, Esc: close]\x1b[0m\r\n";
 

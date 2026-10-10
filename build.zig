@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
     const ssh_mod = mod(b, "src/ssh.zig", target, optimize);
 
     const sdl_mod = mod(b, "src/sdl.zig", target, optimize);
+    const static_sdl = b.option([]const u8, "sdl3-static", "Path to a static SDL3 library for a single-binary build");
     // Windows has no standard place for libraries, so point the search at
     // whatever installed SDL3 -- vcpkg by default.
     if (target.result.os.tag == .windows) {
@@ -42,7 +43,35 @@ pub fn build(b: *std.Build) void {
             sdl_mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
         }
     }
-    sdl_mod.linkSystemLibrary("SDL3", .{});
+    if (static_sdl) |path| {
+        sdl_mod.addObjectFile(if (std.fs.path.isAbsolute(path)) .{ .cwd_relative = path } else b.path(path));
+        switch (target.result.os.tag) {
+            .macos => {
+                for ([_][]const u8{
+                    "CoreMedia",      "CoreVideo", "Cocoa",        "IOKit",        "ForceFeedback",
+                    "Carbon",         "CoreAudio", "AudioToolbox", "AVFoundation", "Foundation",
+                    "GameController", "Metal",     "QuartzCore",
+                }) |framework| sdl_mod.linkFramework(framework, .{});
+                sdl_mod.linkFramework("UniformTypeIdentifiers", .{ .weak = true });
+                sdl_mod.linkFramework("CoreHaptics", .{ .weak = true });
+            },
+            .linux => {
+                sdl_mod.linkSystemLibrary("m", .{});
+                sdl_mod.linkSystemLibrary("pthread", .{});
+                sdl_mod.linkSystemLibrary("dl", .{});
+            },
+            .windows => {
+                for ([_][]const u8{
+                    "advapi32", "dinput8",  "gdi32",    "imm32",   "kernel32",
+                    "ole32",    "oleaut32", "setupapi", "shell32", "user32",
+                    "uuid",     "version",  "winmm",
+                }) |lib| sdl_mod.linkSystemLibrary(lib, .{});
+            },
+            else => {},
+        }
+    } else {
+        sdl_mod.linkSystemLibrary("SDL3", .{});
+    }
 
     const term_mod = mod(b, "src/terminal.zig", target, optimize);
     term_mod.addImport("theme", theme_mod);
@@ -82,8 +111,8 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("app", app_mod);
 
     const exe = b.addExecutable(.{ .name = "ztabb", .root_module = main_mod });
-    // `tools/bundle.sh` rewrites the SDL3 load path to one inside the bundle,
-    // and a Mach-O header has only the padding the linker left it. On arm64 the
+    // Dynamic builds rewrite the SDL3 load path inside the bundle, and a
+    // Mach-O header has only the padding the linker left it. On arm64 the
     // Homebrew path it replaces happens to be about as long, so it fits; on
     // x86_64 Homebrew lives under /usr/local, the replacement is longer, and
     // install_name_tool refuses -- "larger updated load commands do not fit".

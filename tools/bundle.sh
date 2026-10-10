@@ -15,10 +15,10 @@ cp "$out/ztabb.icns" "$app/Contents/Resources/ztabb.icns"
 # The glyph data baked into the binary is a Modified Version of JetBrains
 # Mono, and the OFL requires every distributed copy to carry the licence.
 cp licenses/JetBrainsMono-OFL.txt "$app/Contents/Resources/"
+cp licenses/SDL3.txt "$app/Contents/Resources/"
 
-# Carry SDL3 inside the bundle and point the binary at that copy. Linking the
-# Homebrew path would leave an installed app broken the moment the formula is
-# upgraded or removed.
+# A default development build links SDL3 dynamically. Carry that library in
+# the bundle; release builds link it statically and leave Frameworks empty.
 sdl=$(otool -L "$app/Contents/MacOS/ztabb" | awk '/libSDL3/ {print $1; exit}')
 if [ -n "$sdl" ] && [ -f "$sdl" ]; then
     cp "$sdl" "$app/Contents/Frameworks/"

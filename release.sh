@@ -228,18 +228,18 @@ else
   info "Running tests..."
   zig build test >/dev/null || die "tests failed — refusing to tag $NEW_TAG"
 
-  # ztabb links SDL3, which the release workflow gets from the runner's own
-  # Homebrew, so there is nothing to cross-compile against here. What can be
-  # checked locally is the host release build and the bundle, and the bundle
-  # is what a release actually ships: it renders the icon, runs iconutil,
-  # rewrites the SDL load path and re-signs, any of which can break alone.
+  # Match the release workflow: the shipped executable includes SDL3.
+  info "Building static SDL3..."
+  sh tools/build-static-sdl3.sh >/dev/null \
+    || die "static SDL3 build failed — refusing to tag $NEW_TAG"
+
   info "Building release..."
-  zig build -Doptimize=ReleaseFast >/dev/null \
+  zig build -Doptimize=ReleaseFast -Dsdl3-static=zig-out/sdl3-static/lib/libSDL3.a >/dev/null \
     || die "release build failed — refusing to tag $NEW_TAG"
 
   if [[ "$(uname -s)" == "Darwin" ]]; then
     info "Building app bundle..."
-    zig build bundle -Doptimize=ReleaseFast >/dev/null \
+    zig build bundle -Doptimize=ReleaseFast -Dsdl3-static=zig-out/sdl3-static/lib/libSDL3.a >/dev/null \
       || die "bundle failed — refusing to tag $NEW_TAG"
 
     bin="zig-out/ztabb.app/Contents/MacOS/ztabb"
@@ -250,6 +250,10 @@ else
     if otool -L "$bin" | grep -q /opt/homebrew; then
       otool -L "$bin" >&2
       die "bundle links a Homebrew path — refusing to tag $NEW_TAG"
+    fi
+    if otool -L "$bin" | grep -q SDL3; then
+      otool -L "$bin" >&2
+      die "bundle links SDL3 dynamically — refusing to tag $NEW_TAG"
     fi
     codesign -v zig-out/ztabb.app \
       || die "bundle is not signed — refusing to tag $NEW_TAG"

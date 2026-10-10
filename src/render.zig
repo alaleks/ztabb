@@ -1198,7 +1198,7 @@ pub const Picker = struct {
     /// Rows the box will show at once, before the window's own height is
     /// taken into account. A list that fits should not have to be scrolled.
     pub const MAX_ROWS: usize = 32;
-    const BOX_COLS: u32 = 52;
+    const BOX_COLS: u32 = 70;
     /// Title row plus padding above and below the list.
     const CHROME_ROWS: usize = 5;
     const FIRST_ROW: f32 = 3.0;
@@ -1851,7 +1851,15 @@ test "the picker box is centred and sized to its list" {
     const small = testPicker(3);
     try testing.expectEqual(@as(usize, 3), small.listLines());
     try testing.expectEqual(@as(f32, 16 * 8), small.boxH()); // 3 rows + chrome
+    try testing.expectEqual(@as(f32, 70 * 8), small.boxW());
     try testing.expectEqual((800 - small.boxW()) / 2, small.boxX());
+}
+
+test "the wider picker fits a narrow window" {
+    var p = testPicker(3);
+    p.width = 400;
+    try testing.expectEqual(@as(f32, 400 - 2 * 8), p.boxW());
+    try testing.expectEqual(@as(f32, 8), p.boxX());
 }
 
 test "a long list uses the window rather than scrolling early" {

@@ -41,11 +41,13 @@ jobs:
       - name: Unit tests (ReleaseFast)
         run: zig build test -Doptimize=ReleaseFast
 
-      # The bundle is how the app is actually installed, and it does more than
-      # the plain build: it renders the icon, runs iconutil, rewrites the SDL
-      # load path and re-signs. All of that can break on its own.
+      - name: Build static SDL3
+        run: sh tools/build-static-sdl3.sh
+
+      # The bundle is how the app is actually installed. Release builds link
+      # SDL3 into the executable and need no third-party library in the app.
       - name: Build app bundle
-        run: zig build bundle -Doptimize=ReleaseFast
+        run: zig build bundle -Doptimize=ReleaseFast -Dsdl3-static=zig-out/sdl3-static/lib/libSDL3.a
 
       - name: Check the bundle is self-contained
         run: |
@@ -55,6 +57,7 @@ jobs:
           # The bundled glyph data is a Modified Version of JetBrains Mono,
           # and the OFL requires every distributed copy to carry the licence.
           test -f zig-out/ztabb.app/Contents/Resources/JetBrainsMono-OFL.txt
+          test -f zig-out/ztabb.app/Contents/Resources/SDL3.txt
           # A Homebrew path here means the installed app breaks when the
           # formula is upgraded or removed.
           if otool -L "$bin" | grep -q /opt/homebrew; then
@@ -62,6 +65,12 @@ jobs:
             otool -L "$bin" >&2
             exit 1
           fi
+          if otool -L "$bin" | grep -q SDL3; then
+            echo "bundle still links SDL3 dynamically:" >&2
+            otool -L "$bin" >&2
+            exit 1
+          fi
+          test -z "$(find zig-out/ztabb.app/Contents/Frameworks -type f -print -quit)"
           codesign -v zig-out/ztabb.app
 
   linux:
@@ -87,8 +96,17 @@ jobs:
       - name: Unit tests (ReleaseFast)
         run: zig build test -Doptimize=ReleaseFast
 
+      - name: Install SDL3 build dependencies
+        run: sudo apt-get install -y libx11-dev libxext-dev libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev
+
+      - name: Build static SDL3
+        run: sh tools/build-static-sdl3.sh
+
       - name: Build
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=ReleaseFast -Dsdl3-static=zig-out/sdl3-static/lib/libSDL3.a
+
+      - name: Check SDL3 is not a runtime dependency
+        run: '! ldd zig-out/bin/ztabb | grep -q libSDL3'
 
   windows:
     name: Windows
@@ -221,10 +239,13 @@ jobs:
 
       # `zig build test` compiles and links the test suites, and `main.zig` is
       # in none of them, so the Windows binary itself is never proven to build.
-      # This is that proof -- the same check the Linux job makes -- linking SDL3
-      # through the SDL3_ROOT the install step above exported.
+      # This is that proof -- the same check the Linux job makes -- and also
+      # checks that the static SDL3 archive can be linked on Windows.
       - name: Build
-        run: zig build -Doptimize=ReleaseFast
+        shell: pwsh
+        run: |
+          vcpkg install sdl3:x64-windows-static
+          zig build -Doptimize=ReleaseFast -Dsdl3-static="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static/lib/SDL3-static.lib"
 
   cross:
     name: Cross-compile ${{ matrix.target }}

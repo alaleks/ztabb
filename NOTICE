@@ -1,4 +1,10 @@
-ztabb is MIT licensed (see LICENSE), with one exception recorded here.
+ztabb is MIT licensed (see LICENSE). Third-party components are listed here.
+
+--------------------------------------------------------------------------
+SDL3
+  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
+  SDL3 is linked into release executables. Its licence is in
+  licenses/SDL3.txt (and in the distributed archive).
 
 --------------------------------------------------------------------------
 JetBrains Mono
