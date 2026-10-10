@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>A fast, tiny terminal in one native process.</b><br>
-  0.1 % CPU at idle · about 10 MB on disk · no Electron, no SDL3 install.<br>
+  Low idle CPU · about 10 MB on disk · no Electron, no SDL3 install.<br>
   macOS · Linux · Windows
 </p>
 
@@ -73,7 +73,6 @@ Measured on Apple Silicon against Tabby running alongside:
 
 |           | ztabb      | Tabby  |
 | --------- | ---------- | ------ |
-| Idle CPU  | **0.1 %**  | 14.3 % |
 | Memory    | **110 MB** | 459 MB |
 | Processes | **1**      | 5      |
 | On disk   | **≈10 MB** | 379 MB |

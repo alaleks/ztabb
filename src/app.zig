@@ -22,14 +22,13 @@ const TOAST_MS: u64 = 2200;
 /// pty output is not an SDL event, so the loop has to come back and poll for
 /// it; the wait is the ceiling on how late that output can appear. Holding it
 /// at one frame forever costs ~60 wakeups a second in a window that is just
-/// sitting at a prompt, so it backs off once nothing has happened for a while
-/// and snaps back the moment it does.
+/// sitting at a prompt, so it backs off while keeping new output responsive.
 pub const IdlePacer = struct {
     /// Milliseconds of quiet before each step.
     const SNAPPY_MS: i32 = 2;
     const FRAME_MS: i32 = 16;
-    const RELAXED_MS: i32 = 50;
-    const IDLE_MS: i32 = 120;
+    const RELAXED_MS: i32 = 24;
+    const IDLE_MS: i32 = 32;
 
     quiet_since: u64 = 0,
 
@@ -47,6 +46,15 @@ pub const IdlePacer = struct {
         return IDLE_MS;
     }
 };
+
+test "idle pty poll timeout is at most 32 ms" {
+    var pacer = IdlePacer{};
+    pacer.activity(100);
+    try std.testing.expectEqual(@as(i32, 2), pacer.waitMs(100));
+    try std.testing.expectEqual(@as(i32, 16), pacer.waitMs(300));
+    try std.testing.expectEqual(@as(i32, 24), pacer.waitMs(800));
+    try std.testing.expectEqual(@as(i32, 32), pacer.waitMs(3200));
+}
 
 pub const App = struct {
     gpa: std.mem.Allocator,
@@ -85,6 +93,8 @@ pub const App = struct {
     title_buf: [tabs_mod.MAX_LABEL + 16:0]u8 = @splat(0),
 
     pacer: IdlePacer = .{},
+    /// The last presented frame, used to coalesce bursts of terminal output.
+    last_frame_ms: ?u64 = null,
     /// The range the mouse is drawing, or has drawn, over the terminal.
     selection: ?term.Selection = null,
     dragging: bool = false,
@@ -351,8 +361,7 @@ pub const App = struct {
             if (had_input) self.tabs.awaitEcho(ECHO_WAIT_MS);
             const had_output = self.tabs.pumpAll();
             const scrolled = self.autoScroll();
-            // A turning mark has to be redrawn to turn, and the wait below
-            // would otherwise let the window doze off mid-connection.
+            // Animated labels need regular frames while they are moving.
             const connecting = self.tabs.anyConnecting() or self.marqueeRunning();
             if (connecting) self.ui_dirty = true;
             if (self.tabs.reapExited() > 0) {
@@ -360,17 +369,27 @@ pub const App = struct {
                 if (self.tabs.count == 0) self.running = false;
             }
             self.expireToast();
-            self.render();
 
+            // Keep draining a busy pty, but do not draw a complete window for
+            // every chunk it yields. Input and interface changes draw at once;
+            // a final dirty screen also draws when the burst goes quiet.
             const now = sdl.ticks();
-            if (had_input or had_output or scrolled or connecting) {
+            const output_only = had_output and !had_input and !scrolled and !self.ui_dirty;
+            if (!output_only or self.last_frame_ms == null or
+                now -| self.last_frame_ms.? >= IdlePacer.FRAME_MS)
+            {
+                self.render();
+            }
+
+            if (had_input or had_output or scrolled) {
                 self.pacer.activity(now);
                 continue;
             }
-            // Nothing moving: block instead of spinning. The wait returns the
-            // instant an SDL event arrives, so input stays immediate either way.
+            // Cap animated frames even when the renderer has no vsync. The
+            // wait still returns immediately for an SDL input event.
             var event: sdl.Event = undefined;
-            if (sdl.waitEventTimeout(&event, self.pacer.waitMs(now))) {
+            const wait_ms = if (connecting) IdlePacer.FRAME_MS else self.pacer.waitMs(now);
+            if (sdl.waitEventTimeout(&event, wait_ms)) {
                 self.handleEvent(&event);
                 self.pacer.activity(sdl.ticks());
             }
@@ -1415,6 +1434,7 @@ pub const App = struct {
         }
 
         sdl.renderPresent(self.renderer.r);
+        self.last_frame_ms = sdl.ticks();
     }
 
     /// The title bar carries the tab's own name and nothing else.

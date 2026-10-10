@@ -280,9 +280,12 @@ jobs:
           zig build-obj -target "$t" -lc \
             --dep theme -Mroot=src/highlight.zig -Mtheme=src/theme.zig \
             -femit-bin="$out/highlight.o"
-          zig build-obj -target "$t" -lc \
-            --dep pty --dep term --dep ssh -Mroot=src/tabs.zig \
+          # A test binary forces Zig to analyse the pane pump and its platform
+          # pty implementation; an unreferenced object can compile no code.
+          zig test --test-no-exec -target "$t" -lc \
+            --dep pty --dep term --dep ssh --dep panes -Mroot=src/tabs.zig \
             -Mpty=src/pty.zig \
             --dep theme -Mterm=src/terminal.zig -Mtheme=src/theme.zig \
             -Mssh=src/ssh.zig \
-            -femit-bin="$out/tabs.o"
+            -Mpanes=src/panes.zig \
+            -femit-bin="$out/tabs-tests"

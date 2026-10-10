@@ -255,6 +255,8 @@ pub const Tabs = struct {
     items: [MAX_TABS]Tab = undefined,
     count: usize = 0,
     active_idx: usize = 0,
+    /// Next pane to poll, so a busy early pane cannot starve later ones.
+    pump_cursor: usize = 0,
     scrollback_rows: u32 = term.Terminal.DEFAULT_SCROLLBACK,
     /// The tab's area in cells, kept so a split can be laid out and each
     /// pane's pty told its new size.
@@ -535,32 +537,40 @@ pub const Tabs = struct {
     }
 
     pub fn pumpAll(self: *Tabs) bool {
+        const slot_count = self.count * panes.MAX_PANES;
+        if (slot_count == 0) return false;
+
         var buf: [64 * 1024]u8 = undefined;
         var any = false;
         const deadline = clock.ms() + PUMP_MS;
 
-        var spoke = true;
-        while (spoke) {
-            spoke = false;
-            for (self.slice()) |*t| {
-                for (&t.slots) |*slot| {
-                    const p = if (slot.*) |*v| v else continue;
-                    const n = p.pty.read(&buf) catch {
-                        _ = p.pty.poll();
-                        continue;
-                    };
-                    if (n == 0) continue;
+        var cursor = self.pump_cursor % slot_count;
+        var quiet_slots: usize = 0;
+        while (quiet_slots < slot_count) {
+            const t = &self.items[cursor / panes.MAX_PANES];
+            const slot = &t.slots[cursor % panes.MAX_PANES];
+            cursor = (cursor + 1) % slot_count;
+
+            var n: usize = 0;
+            if (slot.*) |*p| {
+                n = p.pty.read(&buf) catch blk: {
+                    _ = p.pty.poll();
+                    break :blk 0;
+                };
+                if (n > 0) {
                     trace(buf[0..n]);
                     p.terminal.write(buf[0..n]);
                     t.connecting = false;
                     any = true;
-                    spoke = true;
                 }
             }
-            // Checked once a round rather than once a read: a round is bounded
-            // by the number of panes, and the check is not free.
+
+            if (n == 0) quiet_slots += 1 else quiet_slots = 0;
+            // A full round can be expensive with many active panes, so stop
+            // after each read and resume at the next pane on the next call.
             if (clock.ms() >= deadline) break;
         }
+        self.pump_cursor = cursor;
         return any;
     }
 
