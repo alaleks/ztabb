@@ -760,7 +760,7 @@ fn echoCommand() []const [*:0]const u8 {
     return if (@import("builtin").os.tag == .windows)
         // See `catArgv` in pty.zig: `more` pages rather than echoes, so
         // nothing written ever came back.
-        &[_][*:0]const u8{"cmd.exe /c findstr ."}
+        &[_][*:0]const u8{ "findstr.exe", "." }
     else
         &[_][*:0]const u8{ "/bin/cat", "-u" };
 }
@@ -1110,7 +1110,7 @@ test "reapExited closes tabs whose child is gone" {
     _ = try addTestTab(&tabs, "stays", 40, 8);
 
     const argv: []const [*:0]const u8 = if (@import("builtin").os.tag == .windows)
-        &.{"cmd.exe /c exit"}
+        &.{ "cmd.exe", "/c", "exit" }
     else
         &.{"/usr/bin/true"};
     const p = try pty.Pty.spawn(argv, &.{}, 40, 8);

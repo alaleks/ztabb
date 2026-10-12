@@ -70,7 +70,9 @@ pub fn build(b: *std.Build) void {
             else => {},
         }
     } else {
-        sdl_mod.linkSystemLibrary("SDL3", .{});
+        sdl_mod.linkSystemLibrary("SDL3", .{
+            .use_pkg_config = if (target.result.os.tag == .windows) .no else .yes,
+        });
     }
 
     const term_mod = mod(b, "src/terminal.zig", target, optimize);

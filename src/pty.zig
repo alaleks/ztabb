@@ -91,7 +91,7 @@ fn echoArgv() []const [*:0]const u8 {
     return if (posix_only)
         &[_][*:0]const u8{ "/bin/echo", "ztabb" }
     else
-        &[_][*:0]const u8{"cmd.exe /c echo ztabb"};
+        &[_][*:0]const u8{ "cmd.exe", "/c", "echo", "ztabb" };
 }
 
 /// A command that echoes its input back.
@@ -105,7 +105,7 @@ fn catArgv() []const [*:0]const u8 {
         // any line with a character in it and writes it out verbatim -- no line
         // numbers, so the text still starts at the first cell of the first row,
         // which is what some of these check.
-        &[_][*:0]const u8{"cmd.exe /c findstr ."};
+        &[_][*:0]const u8{ "findstr.exe", "." };
 }
 
 /// A command that stays alive briefly without reading its input, so a test can
@@ -114,7 +114,7 @@ fn sleepArgv() []const [*:0]const u8 {
     return if (posix_only)
         &[_][*:0]const u8{ "/bin/sh", "-c", "sleep 3" }
     else
-        &[_][*:0]const u8{"cmd.exe /c ping -n 4 127.0.0.1 >nul"};
+        &[_][*:0]const u8{ "ping.exe", "-n", "4", "127.0.0.1" };
 }
 
 test "the default shell is named" {
@@ -170,7 +170,7 @@ test "poll reports a finished child" {
     const argv = if (posix_only)
         &[_][*:0]const u8{"/usr/bin/true"}
     else
-        &[_][*:0]const u8{"cmd.exe /c exit"};
+        &[_][*:0]const u8{ "cmd.exe", "/c", "exit" };
     var pty = try Pty.spawn(argv, &.{}, 80, 24);
     defer pty.close();
 
