@@ -359,6 +359,24 @@ pub const Tabs = struct {
         self.active_idx = idx;
     }
 
+    pub fn moveTab(self: *Tabs, from: usize, to: usize) Error!void {
+        if (from >= self.count or to >= self.count) return error.InvalidIndex;
+        if (from == to) return;
+
+        const moved = self.items[from];
+        const active_moved = self.active_idx == from;
+        if (from < to) {
+            for (from..to) |i| self.items[i] = self.items[i + 1];
+            if (self.active_idx > from and self.active_idx <= to) self.active_idx -= 1;
+        } else {
+            var i = from;
+            while (i > to) : (i -= 1) self.items[i] = self.items[i - 1];
+            if (self.active_idx >= to and self.active_idx < from) self.active_idx += 1;
+        }
+        self.items[to] = moved;
+        if (active_moved) self.active_idx = to;
+    }
+
     pub fn next(self: *Tabs) void {
         if (self.count == 0) return;
         self.active_idx = (self.active_idx + 1) % self.count;
@@ -815,6 +833,33 @@ test "switchTo rejects an out-of-range index" {
     try testing.expectError(error.InvalidIndex, tabs.switchTo(1));
     try testing.expectError(error.InvalidIndex, tabs.switchTo(99));
     try testing.expectEqual(@as(usize, 0), tabs.active_idx);
+}
+
+test "moving tabs preserves their contents and the focused tab" {
+    var tabs = Tabs.init(testing.allocator);
+    defer tabs.deinit();
+    _ = try addTestTab(&tabs, "a", 80, 24);
+    _ = try addTestTab(&tabs, "b", 80, 24);
+    _ = try addTestTab(&tabs, "c", 80, 24);
+    try tabs.switchTo(1);
+
+    try tabs.moveTab(0, 2);
+    try testing.expectEqualStrings("b", tabs.items[0].label[0..tabs.items[0].label_len]);
+    try testing.expectEqualStrings("c", tabs.items[1].label[0..tabs.items[1].label_len]);
+    try testing.expectEqualStrings("a", tabs.items[2].label[0..tabs.items[2].label_len]);
+    try testing.expectEqual(@as(usize, 0), tabs.active_idx);
+
+    try tabs.moveTab(2, 0);
+    try testing.expectEqualStrings("a", tabs.items[0].label[0..tabs.items[0].label_len]);
+    try testing.expectEqualStrings("b", tabs.items[1].label[0..tabs.items[1].label_len]);
+    try testing.expectEqualStrings("c", tabs.items[2].label[0..tabs.items[2].label_len]);
+    try testing.expectEqual(@as(usize, 1), tabs.active_idx);
+
+    try tabs.moveTab(1, 2);
+    try testing.expectEqual(@as(usize, 2), tabs.active_idx);
+    try tabs.moveTab(2, 0);
+    try testing.expectEqual(@as(usize, 0), tabs.active_idx);
+    try testing.expectError(error.InvalidIndex, tabs.moveTab(3, 0));
 }
 
 test "closing the last tab leaves an empty, safe list" {

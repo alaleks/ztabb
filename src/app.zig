@@ -98,6 +98,7 @@ pub const App = struct {
     /// The range the mouse is drawing, or has drawn, over the terminal.
     selection: ?term.Selection = null,
     dragging: bool = false,
+    tab_drag: ?usize = null,
     /// The cell the program was last told the pointer was in, so motion is
     /// reported once per cell crossed rather than once per pixel moved.
     last_motion_cell: ?struct { col: u32, row: u32 } = null,
@@ -676,7 +677,10 @@ pub const App = struct {
         switch (bar.hit(x, y - self.title_h)) {
             .new_tab => self.newShellTab(),
             .ssh_menu => self.openPicker(),
-            .tab => |i| self.tabs.switchTo(i) catch {},
+            .tab => |i| {
+                self.tabs.switchTo(i) catch {};
+                self.tab_drag = i;
+            },
             .close => |i| {
                 self.tabs.closeTab(i) catch {};
                 if (self.tabs.count == 0) self.running = false;
@@ -820,8 +824,11 @@ pub const App = struct {
     fn onMouseUp(self: *App, ev: sdl.MouseButtonEvent) void {
         self.traceMouse("up", ev.y * self.density);
         self.dragging = false;
+        const was_tab_drag = self.tab_drag != null and ev.button == sdl.BUTTON_LEFT;
+        if (ev.button == sdl.BUTTON_LEFT) self.tab_drag = null;
         self.swallowed_press = null;
         self.last_motion_cell = null;
+        if (was_tab_drag) return;
         // A modal swallowed the press; the program must not be handed the
         // release on its own, which it would read as a click it never saw begin.
         if (self.picker != null or self.menu != null) return;
@@ -888,6 +895,27 @@ pub const App = struct {
 
         const mx = ev.x * hover_scale;
         const my = ev.y * hover_scale;
+
+        if (self.tab_drag) |from| {
+            if (ev.state & sdl.BUTTON_LMASK == 0) {
+                self.tab_drag = null;
+            } else {
+                const bar = self.renderer.tabBar(self.tabs.count, @floatFromInt(self.win_w));
+                const target: ?usize = switch (bar.hit(mx, my - self.title_h)) {
+                    .tab => |i| i,
+                    .close => |i| i,
+                    else => null,
+                };
+                if (target) |to| {
+                    if (self.tabs.moveTab(from, to)) |_| {
+                        self.tab_drag = to;
+                    } else |_| {
+                        self.tab_drag = null;
+                    }
+                }
+                return;
+            }
+        }
 
         // Dragging after a press the program took is someone trying to select
         // text, not to work the program. Say how, the first time only.
