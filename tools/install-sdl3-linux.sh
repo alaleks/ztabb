@@ -21,7 +21,8 @@ if command -v apt-get >/dev/null 2>&1; then
     fi
     echo "no libsdl3-dev package; building from source"
     sudo apt-get install -y -qq cmake ninja-build build-essential git \
-        libx11-dev libxext-dev libwayland-dev wayland-protocols \
+        libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+        libxi-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols \
         libxkbcommon-dev libegl1-mesa-dev
 fi
 

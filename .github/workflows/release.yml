@@ -63,7 +63,10 @@ jobs:
 
       - name: Install SDL3 build dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y libx11-dev libxext-dev libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev
+        run: >-
+          sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev
+          libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev
+          libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev
 
       - name: Build static SDL3
         if: runner.os != 'Windows'
@@ -80,7 +83,7 @@ jobs:
       - name: Build binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: zig build -Doptimize=ReleaseFast -Dsdl3-static="$env:SDL3_ROOT/lib/SDL3-static.lib"
+        run: zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseFast -Dsdl3-static="$env:SDL3_ROOT/lib/SDL3-static.lib"
 
       - name: Check SDL3 is linked into the binary
         if: runner.os != 'Windows'

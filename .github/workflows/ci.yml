@@ -97,7 +97,10 @@ jobs:
         run: zig build test -Doptimize=ReleaseFast
 
       - name: Install SDL3 build dependencies
-        run: sudo apt-get install -y libx11-dev libxext-dev libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev
+        run: >-
+          sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev
+          libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev
+          libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev
 
       - name: Build static SDL3
         run: sh tools/build-static-sdl3.sh
@@ -245,7 +248,7 @@ jobs:
         shell: pwsh
         run: |
           vcpkg install sdl3:x64-windows-static
-          zig build -Doptimize=ReleaseFast -Dsdl3-static="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static/lib/SDL3-static.lib"
+          zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseFast -Dsdl3-static="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static/lib/SDL3-static.lib"
 
   cross:
     name: Cross-compile ${{ matrix.target }}

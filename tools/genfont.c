@@ -92,6 +92,22 @@ static const Range ranges[] = {
     {0x2600, 0x27BF}, // misc symbols and dingbats (agnoster uses several)
     {0xE0A0, 0xE0B3}, // Powerline: branch, padlock, separators
     {0xF8FF, 0xF8FF}, // macOS Apple menu symbol
+    // shortcut: emoji occupy one monochrome cell; add wide cells when alignment or color matters.
+    {0x1F3AF, 0x1F3AF}, // target
+    {0x1F41B, 0x1F41B}, // bug
+    {0x1F440, 0x1F440}, // eyes
+    {0x1F4A1, 0x1F4A1}, // bulb
+    {0x1F4BB, 0x1F4BB}, // laptop
+    {0x1F4C1, 0x1F4C1}, // folder
+    {0x1F4CC, 0x1F4CC}, // pin
+    {0x1F4DD, 0x1F4DD}, // memo
+    {0x1F4E6, 0x1F4E6}, // package
+    {0x1F511, 0x1F512}, // key, lock
+    {0x1F525, 0x1F525}, // fire
+    {0x1F680, 0x1F680}, // rocket
+    {0x1F916, 0x1F916}, // robot
+    {0x1F9E0, 0x1F9E0}, // brain
+    {0x1F9EA, 0x1F9EA}, // test tube
 };
 static const int nranges = sizeof(ranges) / sizeof(ranges[0]);
 

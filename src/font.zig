@@ -432,6 +432,30 @@ test "macOS Apple menu symbol is drawn" {
     for (0..section_count) |i| try testing.expect(!isBlank(0xF8FF, sectionAt(i)));
 }
 
+test "common status symbols are drawn" {
+    for ([_]u21{
+        0x1F3AF, // target
+        0x1F41B, // bug
+        0x1F440, // eyes
+        0x1F4A1, // bulb
+        0x1F4BB, // laptop
+        0x1F4C1, // folder
+        0x1F4CC, // pin
+        0x1F4DD, // memo
+        0x1F4E6, // package
+        0x1F511, // key
+        0x1F512, // lock
+        0x1F525, // fire
+        0x1F680, // rocket
+        0x1F916, // robot
+        0x1F9E0, // brain
+        0x1F9EA, // test tube
+    }) |cp| {
+        try testing.expect(indexOf(cp) != null);
+        for (0..section_count) |i| try testing.expect(!isBlank(cp, sectionAt(i)));
+    }
+}
+
 test "Powerline separators span the full cell so they tile" {
     for (0..section_count) |i| {
         const size = sectionAt(i);

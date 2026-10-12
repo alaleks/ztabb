@@ -123,8 +123,9 @@ Ninja. On Debian or Ubuntu, also install the X11 and Wayland development
 packages used by the release build:
 
 ```sh
-sudo apt-get install -y libx11-dev libxext-dev libwayland-dev \
-  wayland-protocols libxkbcommon-dev libegl1-mesa-dev
+sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev \
+  libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+  libwayland-dev wayland-protocols libxkbcommon-dev libegl1-mesa-dev
 ```
 
 An installed SDL3 is not needed for this build:
@@ -138,7 +139,7 @@ On macOS, package that executable as an app with
 `zig build bundle -Doptimize=ReleaseFast -Dsdl3-static=zig-out/sdl3-static/lib/libSDL3.a`.
 
 On Windows, use `vcpkg install sdl3:x64-windows-static`, then
-`zig build -Dsdl3-static=<vcpkg>/installed/x64-windows-static/lib/SDL3-static.lib`.
+`zig build -Dtarget=x86_64-windows-msvc -Dsdl3-static=<vcpkg>/installed/x64-windows-static/lib/SDL3-static.lib`.
 
 <details>
 <summary>Artwork and typeface</summary>

@@ -6,11 +6,11 @@
 // It is a Modified Version of that Font Software and is licensed under
 // the SIL Open Font License 1.1 -- see NOTICE and licenses/ -- not under
 // ztabb's MIT licence.
-// Glyph coverage lives in font.dat: 1068 glyphs per section,
+// Glyph coverage lives in font.dat: 1084 glyphs per section,
 // one byte per pixel, sections listed below.
 // Baked from JetBrains Mono.
 
-pub const glyph_count: usize = 1068;
+pub const glyph_count: usize = 1084;
 
 /// 0 = regular, 1 = bold, 2 = medium.
 pub const Section = struct {
@@ -25,23 +25,23 @@ pub const Section = struct {
 
 pub const sections = [_]Section{
     .{ .w = 6, .h = 13, .weight = 2, .points = 10, .density = 1, .offset = 0 },
-    .{ .w = 7, .h = 15, .weight = 2, .points = 11, .density = 1, .offset = 83304 },
-    .{ .w = 8, .h = 17, .weight = 2, .points = 13, .density = 1, .offset = 195444 },
-    .{ .w = 7, .h = 15, .weight = 0, .points = 11, .density = 1, .offset = 340692 },
-    .{ .w = 7, .h = 15, .weight = 1, .points = 11, .density = 1, .offset = 452832 },
-    .{ .w = 8, .h = 17, .weight = 0, .points = 13, .density = 1, .offset = 564972 },
-    .{ .w = 8, .h = 17, .weight = 1, .points = 13, .density = 1, .offset = 710220 },
-    .{ .w = 10, .h = 21, .weight = 0, .points = 16, .density = 1, .offset = 855468 },
-    .{ .w = 10, .h = 21, .weight = 1, .points = 16, .density = 1, .offset = 1079748 },
-    .{ .w = 12, .h = 26, .weight = 2, .points = 10, .density = 2, .offset = 1304028 },
-    .{ .w = 14, .h = 30, .weight = 2, .points = 11, .density = 2, .offset = 1637244 },
-    .{ .w = 16, .h = 34, .weight = 2, .points = 13, .density = 2, .offset = 2085804 },
-    .{ .w = 14, .h = 30, .weight = 0, .points = 11, .density = 2, .offset = 2666796 },
-    .{ .w = 14, .h = 30, .weight = 1, .points = 11, .density = 2, .offset = 3115356 },
-    .{ .w = 16, .h = 34, .weight = 0, .points = 13, .density = 2, .offset = 3563916 },
-    .{ .w = 16, .h = 34, .weight = 1, .points = 13, .density = 2, .offset = 4144908 },
-    .{ .w = 20, .h = 42, .weight = 0, .points = 16, .density = 2, .offset = 4725900 },
-    .{ .w = 20, .h = 42, .weight = 1, .points = 16, .density = 2, .offset = 5623020 },
+    .{ .w = 7, .h = 15, .weight = 2, .points = 11, .density = 1, .offset = 84552 },
+    .{ .w = 8, .h = 17, .weight = 2, .points = 13, .density = 1, .offset = 198372 },
+    .{ .w = 7, .h = 15, .weight = 0, .points = 11, .density = 1, .offset = 345796 },
+    .{ .w = 7, .h = 15, .weight = 1, .points = 11, .density = 1, .offset = 459616 },
+    .{ .w = 8, .h = 17, .weight = 0, .points = 13, .density = 1, .offset = 573436 },
+    .{ .w = 8, .h = 17, .weight = 1, .points = 13, .density = 1, .offset = 720860 },
+    .{ .w = 10, .h = 21, .weight = 0, .points = 16, .density = 1, .offset = 868284 },
+    .{ .w = 10, .h = 21, .weight = 1, .points = 16, .density = 1, .offset = 1095924 },
+    .{ .w = 12, .h = 26, .weight = 2, .points = 10, .density = 2, .offset = 1323564 },
+    .{ .w = 14, .h = 30, .weight = 2, .points = 11, .density = 2, .offset = 1661772 },
+    .{ .w = 16, .h = 34, .weight = 2, .points = 13, .density = 2, .offset = 2117052 },
+    .{ .w = 14, .h = 30, .weight = 0, .points = 11, .density = 2, .offset = 2706748 },
+    .{ .w = 14, .h = 30, .weight = 1, .points = 11, .density = 2, .offset = 3162028 },
+    .{ .w = 16, .h = 34, .weight = 0, .points = 13, .density = 2, .offset = 3617308 },
+    .{ .w = 16, .h = 34, .weight = 1, .points = 13, .density = 2, .offset = 4207004 },
+    .{ .w = 20, .h = 42, .weight = 0, .points = 16, .density = 2, .offset = 4796700 },
+    .{ .w = 20, .h = 42, .weight = 1, .points = 16, .density = 2, .offset = 5707260 },
 };
 
 /// Terminal point sizes, smallest first; the middle one is the default.
@@ -71,4 +71,19 @@ pub const ranges = [_]Range{
     .{ .lo = 0x2600, .hi = 0x27BF, .base = 599 },
     .{ .lo = 0xE0A0, .hi = 0xE0B3, .base = 1047 },
     .{ .lo = 0xF8FF, .hi = 0xF8FF, .base = 1067 },
+    .{ .lo = 0x1F3AF, .hi = 0x1F3AF, .base = 1068 },
+    .{ .lo = 0x1F41B, .hi = 0x1F41B, .base = 1069 },
+    .{ .lo = 0x1F440, .hi = 0x1F440, .base = 1070 },
+    .{ .lo = 0x1F4A1, .hi = 0x1F4A1, .base = 1071 },
+    .{ .lo = 0x1F4BB, .hi = 0x1F4BB, .base = 1072 },
+    .{ .lo = 0x1F4C1, .hi = 0x1F4C1, .base = 1073 },
+    .{ .lo = 0x1F4CC, .hi = 0x1F4CC, .base = 1074 },
+    .{ .lo = 0x1F4DD, .hi = 0x1F4DD, .base = 1075 },
+    .{ .lo = 0x1F4E6, .hi = 0x1F4E6, .base = 1076 },
+    .{ .lo = 0x1F511, .hi = 0x1F512, .base = 1077 },
+    .{ .lo = 0x1F525, .hi = 0x1F525, .base = 1079 },
+    .{ .lo = 0x1F680, .hi = 0x1F680, .base = 1080 },
+    .{ .lo = 0x1F916, .hi = 0x1F916, .base = 1081 },
+    .{ .lo = 0x1F9E0, .hi = 0x1F9E0, .base = 1082 },
+    .{ .lo = 0x1F9EA, .hi = 0x1F9EA, .base = 1083 },
 };
