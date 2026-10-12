@@ -17,14 +17,29 @@ for tool in git cmake ninja; do
     }
 done
 
-git clone --quiet --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git "$tmp/SDL"
-actual=$(git -C "$tmp/SDL" rev-parse HEAD)
+sdl_src=
+attempt=1
+while [ "$attempt" -le 3 ]; do
+    sdl_src="$tmp/SDL-$attempt"
+    if git -c http.version=HTTP/1.1 clone --quiet --depth 1 --branch "$SDL_TAG" \
+        https://github.com/libsdl-org/SDL.git "$sdl_src"; then
+        break
+    fi
+    if [ "$attempt" -eq 3 ]; then
+        printf 'SDL3 clone failed after 3 attempts\n' >&2
+        exit 1
+    fi
+    printf 'Retrying SDL3 clone (%s/3)...\n' "$attempt" >&2
+    sleep "$attempt"
+    attempt=$((attempt + 1))
+done
+actual=$(git -C "$sdl_src" rev-parse HEAD)
 if [ "$actual" != "$SDL_COMMIT" ]; then
     printf 'SDL3 tag moved: expected %s, got %s\n' "$SDL_COMMIT" "$actual" >&2
     exit 1
 fi
 
-cmake -S "$tmp/SDL" -B "$tmp/build" -G Ninja \
+cmake -S "$sdl_src" -B "$tmp/build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$prefix" \
     -DSDL_SHARED=OFF -DSDL_STATIC=ON \
