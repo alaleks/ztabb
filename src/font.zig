@@ -427,6 +427,11 @@ test "Powerline and prompt-theme symbols are covered" {
     }
 }
 
+test "macOS Apple menu symbol is drawn" {
+    try testing.expect(indexOf(0xF8FF) != null);
+    for (0..section_count) |i| try testing.expect(!isBlank(0xF8FF, sectionAt(i)));
+}
+
 test "Powerline separators span the full cell so they tile" {
     for (0..section_count) |i| {
         const size = sectionAt(i);

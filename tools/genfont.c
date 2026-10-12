@@ -91,6 +91,7 @@ static const Range ranges[] = {
     {0x25A0, 0x25FF}, // geometric shapes
     {0x2600, 0x27BF}, // misc symbols and dingbats (agnoster uses several)
     {0xE0A0, 0xE0B3}, // Powerline: branch, padlock, separators
+    {0xF8FF, 0xF8FF}, // macOS Apple menu symbol
 };
 static const int nranges = sizeof(ranges) / sizeof(ranges[0]);
 
