@@ -90,6 +90,7 @@ static const Range ranges[] = {
     {0x2580, 0x259F}, // block elements
     {0x25A0, 0x25FF}, // geometric shapes
     {0x2600, 0x27BF}, // misc symbols and dingbats (agnoster uses several)
+    {0x2800, 0x28FF}, // Braille progress spinners (npm and other package managers)
     {0xE0A0, 0xE0B3}, // Powerline: branch, padlock, separators
     {0xF8FF, 0xF8FF}, // macOS Apple menu symbol
     // shortcut: emoji occupy one monochrome cell; add wide cells when alignment or color matters.

@@ -416,6 +416,14 @@ test "ASCII, Cyrillic and box drawing are all covered" {
     }
 }
 
+test "Braille progress spinners have glyphs" {
+    for (0x2800..0x2900) |cp| {
+        try testing.expect(indexOf(@intCast(cp)) != null);
+        if (cp == 0x2800) continue; // Braille blank is intentionally empty.
+        for (0..section_count) |i| try testing.expect(!isBlank(@intCast(cp), sectionAt(i)));
+    }
+}
+
 test "Powerline and prompt-theme symbols are covered" {
     for ([_]u21{ 0xE0A0, 0xE0A1, 0xE0A2, 0xE0B0, 0xE0B1, 0xE0B2, 0xE0B3 }) |cp| {
         try testing.expect(indexOf(cp) != null);
