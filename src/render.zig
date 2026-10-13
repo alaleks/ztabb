@@ -131,10 +131,10 @@ pub const Renderer = struct {
     density: u32,
     /// Where the interface face's marks sit inside its cell.
     ui_ink: font.Ink = .{ .top = 0, .bottom = 0 },
-    /// Which glyphs have nothing to draw, for each atlas in use.
-    blank_regular: font.BlankSet = .{},
-    blank_bold: font.BlankSet = .{},
-    blank_ui: font.BlankSet = .{},
+    /// Which glyphs each texture holds so far, and which have nothing to draw.
+    cache_regular: font.Cache,
+    cache_bold: font.Cache,
+    cache_ui: font.Cache,
     /// Interface text: weight 500 at a smaller size, for tab labels and
     /// dialogs. Terminal text has to stay on the grid; chrome does not, and
     /// reads better a step down in size and a step up in weight.
@@ -155,6 +155,9 @@ pub const Renderer = struct {
             .density = 1,
             .ui = undefined,
             .ui_size = font.uiSize(font.default_points, 1),
+            .cache_regular = undefined,
+            .cache_bold = undefined,
+            .cache_ui = undefined,
             .icon_strip = undefined,
             .icon_size = 0,
         };
@@ -177,15 +180,9 @@ pub const Renderer = struct {
     }
 
     fn uploadUi(self: *Renderer, size: font.Size) !void {
-        const pixels = try self.gpa.alloc(u32, font.atlasPixels(size));
-        defer self.gpa.free(pixels);
-        const w: i32 = @intCast(font.atlasW(size));
-        font.buildAtlas(size, pixels);
-        const tex = try sdl.createTexture(self.r, w, @intCast(font.atlasH(size)), false);
-        sdl.updateTexture(tex, pixels, w * 4);
-        self.ui = tex;
+        self.ui = try sdl.createTexture(self.r, @intCast(font.cacheW(size)), @intCast(font.cacheH(size)), false);
         self.ui_size = size;
-        self.blank_ui = font.BlankSet.build(size);
+        self.cache_ui = font.Cache.init(size);
         self.ui_ink = font.Ink.measure(size);
     }
 
@@ -211,7 +208,7 @@ pub const Renderer = struct {
         // Icons are drawn smaller than they are rasterized, so they want the
         // smoothing filter; the glyph atlases are drawn 1:1 and do not.
         const tex = try sdl.createTexture(self.r, w, @intCast(size), true);
-        sdl.updateTexture(tex, pixels, w * 4);
+        sdl.updateTexture(tex, null, pixels, w * 4);
         self.icon_strip = tex;
         self.icon_size = size;
     }
@@ -247,28 +244,39 @@ pub const Renderer = struct {
         sdl.renderTexture(self.r, self.icon_strip, &src, &dst);
     }
 
+    /// Creates empty glyph textures for `size`; glyphs are uploaded on first use.
     fn uploadAtlas(self: *Renderer, size: font.Size) !void {
-        const pixels = try self.gpa.alloc(u32, font.atlasPixels(size));
-        defer self.gpa.free(pixels);
+        const w: i32 = @intCast(font.cacheW(size));
+        const h: i32 = @intCast(font.cacheH(size));
 
-        const w: i32 = @intCast(font.atlasW(size));
-        const h: i32 = @intCast(font.atlasH(size));
-
-        font.buildAtlas(size, pixels);
         const regular = try sdl.createTexture(self.r, w, h, false);
         errdefer sdl.destroyTexture(regular);
-        sdl.updateTexture(regular, pixels, w * 4);
-
-        font.buildAtlas(font.termSize(size.points, size.density, .bold), pixels);
         const bold = try sdl.createTexture(self.r, w, h, false);
-        errdefer sdl.destroyTexture(bold);
-        sdl.updateTexture(bold, pixels, w * 4);
 
         self.regular = regular;
         self.bold = bold;
         self.atlas_size = size;
-        self.blank_regular = font.BlankSet.build(size);
-        self.blank_bold = font.BlankSet.build(font.termSize(size.points, size.density, .bold));
+        self.cache_regular = font.Cache.init(size);
+        self.cache_bold = font.Cache.init(font.termSize(size.points, size.density, .bold));
+    }
+
+    /// Where `cp` sits in `tex`, uploading it the first time it is drawn.
+    /// Null when the glyph has nothing to draw.
+    fn glyphSrc(tex: *sdl.Texture, cache: *font.Cache, cp: u21) ?sdl.FRect {
+        const s = cache.slot(cp) orelse return null;
+        const size = cache.size;
+        if (s.fresh) {
+            var px: [font.max_glyph_pixels]u32 = undefined;
+            font.expandGlyph(cp, size, &px);
+            const rect = sdl.Rect{ .x = @intCast(s.x), .y = @intCast(s.y), .w = @intCast(size.w), .h = @intCast(size.h) };
+            sdl.updateTexture(tex, &rect, px[0..size.pixels()], @intCast(size.w * 4));
+        }
+        return .{
+            .x = @floatFromInt(s.x),
+            .y = @floatFromInt(s.y),
+            .w = @floatFromInt(size.w),
+            .h = @floatFromInt(size.h),
+        };
     }
 
     /// Re-bakes the atlas when the cell size moves to a different glyph set,
@@ -333,39 +341,24 @@ pub const Renderer = struct {
     /// sharing a colour costs one state change instead of one per cell --
     /// every change flushes SDL's batch, and a full window of ordinary output
     /// is thousands of cells in a single colour.
-    fn queueGlyph(self: *Renderer, tex: *sdl.Texture, cp: u21, x: f32, y: f32) void {
-        const rect = font.atlasRect(cp, self.atlas_size);
-        const src = sdl.FRect{
-            .x = @floatFromInt(rect.x),
-            .y = @floatFromInt(rect.y),
-            .w = @floatFromInt(self.atlas_size.w),
-            .h = @floatFromInt(self.atlas_size.h),
-        };
+    fn queueGlyph(self: *Renderer, tex: *sdl.Texture, src: *const sdl.FRect, x: f32, y: f32) void {
         const dst = sdl.FRect{
             .x = x,
             .y = y,
             .w = @floatFromInt(self.cellW()),
             .h = @floatFromInt(self.cellH()),
         };
-        sdl.renderTexture(self.r, tex, &src, &dst);
+        sdl.renderTexture(self.r, tex, src, &dst);
     }
 
-    fn blankSet(self: *const Renderer, bold: bool) *const font.BlankSet {
-        return if (bold) &self.blank_bold else &self.blank_regular;
+    fn cacheFor(self: *Renderer, bold: bool) *font.Cache {
+        return if (bold) &self.cache_bold else &self.cache_regular;
     }
 
     fn drawGlyph(self: *Renderer, cp: u21, x: f32, y: f32, color: u32, bold: bool) void {
         if (cp == ' ' or cp == 0) return;
-        if (self.blankSet(bold).has(cp)) return;
-
         const tex = if (bold) self.bold else self.regular;
-        const rect = font.atlasRect(cp, self.atlas_size);
-        const src = sdl.FRect{
-            .x = @floatFromInt(rect.x),
-            .y = @floatFromInt(rect.y),
-            .w = @floatFromInt(self.atlas_size.w),
-            .h = @floatFromInt(self.atlas_size.h),
-        };
+        const src = glyphSrc(tex, self.cacheFor(bold), cp) orelse return;
         const dst = sdl.FRect{
             .x = x,
             .y = y,
@@ -385,14 +378,8 @@ pub const Renderer = struct {
         const ch: f32 = @floatFromInt(self.ui_size.h);
         var col: f32 = 0;
         while (it.nextCodepoint()) |cp| : (col += 1) {
-            if (cp == ' ' or cp == 0 or self.blank_ui.has(cp)) continue;
-            const rect = font.atlasRect(cp, self.ui_size);
-            const src = sdl.FRect{
-                .x = @floatFromInt(rect.x),
-                .y = @floatFromInt(rect.y),
-                .w = cw,
-                .h = ch,
-            };
+            if (cp == ' ' or cp == 0) continue;
+            const src = glyphSrc(self.ui, &self.cache_ui, cp) orelse continue;
             const dst = sdl.FRect{ .x = @round(x + col * cw), .y = @round(y), .w = cw, .h = ch };
             sdl.setTextureColorMod(self.ui, color);
             sdl.renderTexture(self.r, self.ui, &src, &dst);
@@ -551,7 +538,8 @@ pub const Renderer = struct {
                 const cell = cells[col];
                 if (cell.ch == ' ' or cell.ch == 0) continue;
                 const bold = cell.attrs.bold;
-                if (self.blankSet(bold).has(cell.ch)) continue;
+                const tex = if (bold) self.bold else self.regular;
+                const src = glyphSrc(tex, self.cacheFor(bold), cell.ch) orelse continue;
 
                 var fg = term.Terminal.resolve(cell, th).fg;
                 if (hl) |o| {
@@ -560,7 +548,6 @@ pub const Renderer = struct {
                     }
                 }
 
-                const tex = if (bold) self.bold else self.regular;
                 if (bound_tex != tex or bound_color != fg) {
                     sdl.setTextureColorMod(tex, fg);
                     bound_tex = tex;
@@ -568,7 +555,7 @@ pub const Renderer = struct {
                 }
 
                 const x = left + @as(f32, @floatFromInt(col)) * cw;
-                self.queueGlyph(tex, cell.ch, x, y);
+                self.queueGlyph(tex, &src, x, y);
 
                 if (cell.attrs.underline) {
                     self.fill(x, y + ch - self.hairline(), cw, self.hairline(), fg);

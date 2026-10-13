@@ -405,8 +405,9 @@ pub fn destroyTexture(tex: ?*Texture) void {
     SDL_DestroyTexture(tex);
 }
 
-pub fn updateTexture(tex: ?*Texture, pixels: []const u32, pitch_bytes: i32) void {
-    _ = SDL_UpdateTexture(tex, null, pixels.ptr, pitch_bytes);
+/// Replaces `rect` of the texture, or all of it when `rect` is null.
+pub fn updateTexture(tex: ?*Texture, rect: ?*const Rect, pixels: []const u32, pitch_bytes: i32) void {
+    _ = SDL_UpdateTexture(tex, rect, pixels.ptr, pitch_bytes);
 }
 
 pub fn setTextureColorMod(tex: ?*Texture, rgb: u32) void {

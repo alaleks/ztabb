@@ -124,8 +124,8 @@ pub fn glyph(cp: u21, size: Size) []const u8 {
 
 /// True when the glyph has no coverage at all — used to skip drawing entirely.
 ///
-/// Scans the glyph, so it is not for per-cell use in a render loop: build a
-/// `BlankSet` once per atlas instead.
+/// Scans the glyph, so it is not for per-cell use in a render loop: a `Cache`
+/// remembers the answer.
 pub fn isBlank(cp: u21, size: Size) bool {
     for (glyph(cp, size)) |v| {
         if (v != 0) return false;
@@ -170,93 +170,89 @@ pub const Ink = struct {
     }
 };
 
-/// One bit per glyph, marking those with nothing to draw.
-///
-/// The renderer asks this for every cell on screen; scanning the glyph each
-/// time costs a few hundred byte reads per cell, which on a full window is
-/// millions per frame for an answer that never changes.
-pub const BlankSet = struct {
-    bits: [(glyph_count + 63) / 64]u64 = @splat(0),
+// -- glyph cache -----------------------------------------------------------
 
-    pub fn build(size: Size) BlankSet {
-        var set = BlankSet{};
-        for (0..glyph_count) |i| {
-            const per_glyph = size.pixels();
-            const px = blob[size.offset + i * per_glyph ..][0..per_glyph];
-            var blank = true;
-            for (px) |v| {
-                if (v != 0) {
-                    blank = false;
-                    break;
-                }
-            }
-            if (blank) set.bits[i / 64] |= @as(u64, 1) << @intCast(i % 64);
-        }
-        return set;
+/// Slots in one cache texture. A session draws a few hundred distinct glyphs,
+/// so uploading all of them up front would hold megabytes of texture nobody
+/// looks at.
+pub const cache_cols: u32 = 32;
+pub const cache_slots: u32 = cache_cols * cache_cols;
+
+pub fn cacheW(size: Size) u32 {
+    return cache_cols * size.w;
+}
+
+pub fn cacheH(size: Size) u32 {
+    return (cache_slots / cache_cols) * size.h;
+}
+
+/// The largest glyph any section holds, so callers can expand one on the stack.
+pub const max_glyph_pixels: usize = blk: {
+    var m: usize = 0;
+    for (data.sections) |sct| m = @max(m, sct.w * sct.h);
+    break :blk m;
+};
+
+/// Expands one glyph to white ARGB whose alpha carries the coverage, ready for
+/// `SDL_UpdateTexture`. Colour comes from a per-draw colour mod, so one texture
+/// serves every palette entry and both themes.
+pub fn expandGlyph(cp: u21, size: Size, out: []u32) void {
+    for (glyph(cp, size), out[0..size.pixels()]) |a, *px| {
+        // Straight (non-premultiplied) alpha over white, which is what
+        // SDL_BLENDMODE_BLEND with a colour mod expects.
+        px.* = (@as(u32, a) << 24) | 0x00FFFFFF;
+    }
+}
+
+/// Which glyphs of one section are resident in its texture, and where.
+/// Glyphs are placed on first use; when every slot is taken the cache starts
+/// over, which only a screen of more distinct glyphs than slots can cause.
+pub const Cache = struct {
+    size: Size,
+    slot_of: [glyph_count]u16 = @splat(unseen),
+    used: u16 = 0,
+
+    const unseen = std.math.maxInt(u16);
+    const blank = unseen - 1;
+
+    pub const Slot = struct {
+        x: u32,
+        y: u32,
+        /// The texture does not hold this glyph yet: the caller must upload it.
+        fresh: bool,
+    };
+
+    pub fn init(size: Size) Cache {
+        return .{ .size = size };
     }
 
-    pub fn has(self: *const BlankSet, cp: u21) bool {
-        const i = resolveIndex(cp);
-        return self.bits[i / 64] & (@as(u64, 1) << @intCast(i % 64)) != 0;
+    /// Where `cp` lives in the texture, or null when it has nothing to draw.
+    pub fn slot(self: *Cache, cp: u21) ?Slot {
+        const idx = resolveIndex(cp);
+        var s = self.slot_of[idx];
+        if (s == blank) return null;
+        const fresh = s == unseen;
+        if (fresh) {
+            if (std.mem.allEqual(u8, glyph(cp, self.size), 0)) {
+                self.slot_of[idx] = blank;
+                return null;
+            }
+            if (self.used == cache_slots) {
+                @memset(&self.slot_of, unseen);
+                self.used = 0;
+            }
+            s = self.used;
+            self.used += 1;
+            self.slot_of[idx] = s;
+        }
+        return .{
+            .x = (s % cache_cols) * self.size.w,
+            .y = (s / cache_cols) * self.size.h,
+            .fresh = fresh,
+        };
     }
 };
 
-// -- atlas -----------------------------------------------------------------
-
-// Wide enough that the tallest atlas stays well inside 8192px textures.
-pub const atlas_cols: u32 = 64;
-pub const atlas_rows: u32 = (glyph_count + atlas_cols - 1) / atlas_cols;
-
-pub fn atlasW(size: Size) u32 {
-    return atlas_cols * size.w;
-}
-
-pub fn atlasH(size: Size) u32 {
-    return atlas_rows * size.h;
-}
-
-pub fn atlasPixels(size: Size) usize {
-    return atlasW(size) * atlasH(size);
-}
-
-/// Expands one weight into a white ARGB atlas whose alpha carries the glyph
-/// coverage, ready for `SDL_UpdateTexture`. Colour comes from a per-draw
-/// colour mod, so one atlas serves every palette entry and both themes.
-///
-/// `out` must hold `atlasPixels(size)` entries; the caller owns it.
-pub fn buildAtlas(size: Size, out: []u32) void {
-    const w = atlasW(size);
-    std.debug.assert(out.len >= atlasPixels(size));
-    @memset(out[0..atlasPixels(size)], 0x00000000);
-
-    for (0..glyph_count) |i| {
-        const per_glyph = size.pixels();
-        const src = blob[size.offset + i * per_glyph ..][0..per_glyph];
-
-        const cell_x = (i % atlas_cols) * size.w;
-        const cell_y = (i / atlas_cols) * size.h;
-        for (0..size.h) |y| {
-            const row_base = (cell_y + y) * w + cell_x;
-            for (0..size.w) |x| {
-                const a: u32 = src[y * size.w + x];
-                // Straight (non-premultiplied) alpha over white, which is what
-                // SDL_BLENDMODE_BLEND with a colour mod expects.
-                out[row_base + x] = (a << 24) | 0x00FFFFFF;
-            }
-        }
-    }
-}
-
-/// Top-left corner of `cp` within the atlas, in pixels.
-pub const AtlasRect = struct { x: u32, y: u32 };
-
-pub fn atlasRect(cp: u21, size: Size) AtlasRect {
-    const idx = resolveIndex(cp);
-    return .{
-        .x = @intCast((idx % atlas_cols) * size.w),
-        .y = @intCast((idx / atlas_cols) * size.h),
-    };
-}
 
 // -- tests -----------------------------------------------------------------
 
@@ -526,19 +522,21 @@ test "the cap band excludes descenders and tall punctuation" {
     try testing.expect(ink.bottom <= bounds('A', size).bottom + 2);
 }
 
-test "the blank set agrees with a direct scan" {
+test "the cache skips blank glyphs and agrees with a direct scan" {
     for (0..section_count) |i| {
         const size = sectionAt(i);
-        const set = BlankSet.build(size);
-        // Spot-check across the whole range rather than every glyph at every size.
-        for ([_]u21{ ' ', 'A', 'g', 'Ж', 0x2588, 0x2500, 0xE0B0, 0xE0A5, 0x4E00 }) |cp| {
-            try testing.expectEqual(isBlank(cp, size), set.has(cp));
+        var cache = Cache.init(size);
+        // Asked twice: the second answer comes from the cache, not a scan.
+        for (0..2) |_| {
+            for ([_]u21{ ' ', 'A', 'g', 'Ж', 0x2588, 0x2500, 0xE0B0, 0xE0A5, 0x4E00 }) |cp| {
+                try testing.expectEqual(isBlank(cp, size), cache.slot(cp) == null);
+            }
         }
     }
 }
 
-test "the blank set is small enough to keep beside each atlas" {
-    try testing.expect(@sizeOf(BlankSet) <= 1024);
+test "the cache is small enough to keep one per face" {
+    try testing.expect(@sizeOf(Cache) <= 16 * 1024);
 }
 
 test "space is blank and letters are not, in every section" {
@@ -618,39 +616,60 @@ test "shade blocks are evenly tinted and ordered light to dark" {
     }
 }
 
-test "buildAtlas lays glyphs out on the expected grid" {
-    const gpa = testing.allocator;
+test "a glyph is fresh once, then found where it was put" {
+    var cache = Cache.init(termSize(default_points, 1, .regular));
+    const a = cache.slot('A').?;
+    try testing.expect(a.fresh);
+    const b = cache.slot('B').?;
+    try testing.expect(b.fresh);
+    try testing.expect(a.x != b.x or a.y != b.y);
+
+    const again = cache.slot('A').?;
+    try testing.expect(!again.fresh);
+    try testing.expectEqual(a.x, again.x);
+    try testing.expectEqual(a.y, again.y);
+}
+
+test "unmapped codepoints share the replacement box's slot" {
+    var cache = Cache.init(termSize(default_points, 1, .regular));
+    const box = cache.slot(replacement).?;
+    const cjk = cache.slot(0x4E00).?;
+    try testing.expect(!cjk.fresh);
+    try testing.expectEqual(box.x, cjk.x);
+    try testing.expectEqual(box.y, cjk.y);
+}
+
+test "every slot lies inside the cache texture, and a full cache starts over" {
     for (0..section_count) |i| {
         const size = sectionAt(i);
-        const pixels = try gpa.alloc(u32, atlasPixels(size));
-        defer gpa.free(pixels);
-        buildAtlas(size, pixels);
-
-        for (0..size.h) |y| {
-            for (0..size.w) |x| {
-                try testing.expectEqual(@as(u32, 0x00FFFFFF), pixels[y * atlasW(size) + x]);
-            }
+        var cache = Cache.init(size);
+        var placed: u32 = 0;
+        var cp: u21 = 0;
+        while (placed < cache_slots) : (cp += 1) {
+            if (indexOf(cp) == null) continue;
+            const s = cache.slot(cp) orelse continue;
+            try testing.expect(s.fresh);
+            try testing.expect(s.x + size.w <= cacheW(size));
+            try testing.expect(s.y + size.h <= cacheH(size));
+            placed += 1;
         }
-
-        const rect = atlasRect('A', size);
-        const bits = glyph('A', size);
-        for (0..size.h) |y| {
-            for (0..size.w) |x| {
-                const a: u32 = bits[y * size.w + x];
-                const px = pixels[(rect.y + y) * atlasW(size) + rect.x + x];
-                try testing.expectEqual((a << 24) | 0x00FFFFFF, px);
-            }
-        }
+        // The next new glyph evicts everything and lands back at the start.
+        while (indexOf(cp) == null or isBlank(cp, size)) cp += 1;
+        const s = cache.slot(cp).?;
+        try testing.expect(s.fresh);
+        try testing.expectEqual(@as(u32, 0), s.x);
+        try testing.expectEqual(@as(u32, 0), s.y);
+        try testing.expect(cache.slot(' ') == null);
+        try testing.expect(cache.slot('A').?.fresh); // evicted, so uploaded again
     }
 }
 
-test "atlas is large enough for every glyph" {
-    for (0..section_count) |i| {
-        const size = sectionAt(i);
-        try testing.expect(atlas_rows * atlas_cols >= glyph_count);
-        const last = atlasRect(0x2718, size);
-        try testing.expect(last.x + size.w <= atlasW(size));
-        try testing.expect(last.y + size.h <= atlasH(size));
+test "expandGlyph carries coverage in alpha over white" {
+    const size = termSize(default_points, 2, .regular);
+    var px: [max_glyph_pixels]u32 = undefined;
+    expandGlyph('A', size, &px);
+    for (glyph('A', size), px[0..size.pixels()]) |a, p| {
+        try testing.expectEqual((@as(u32, a) << 24) | 0x00FFFFFF, p);
     }
 }
 

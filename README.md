@@ -74,13 +74,12 @@ Measured on Apple Silicon against Tabby running alongside:
 
 |           | ztabb      | Tabby  |
 | --------- | ---------- | ------ |
-| Memory    | **140 MB** | 459 MB |
+| Memory    | **110 MB** | 459 MB |
 | Processes | **1**      | 5      |
 | On disk   | **≈30 MB** | 379 MB |
 
-A rough comparison, not a benchmark. Most of the 140 MB is the SDL window and
-Metal renderer themselves (88 MB empty); ztabb's own share is about 52 MB,
-most of it the baked glyph atlases.
+A rough comparison, not a benchmark. Most of the 110 MB is the SDL window and
+Metal renderer themselves (88 MB empty); ztabb's own share is about 23 MB.
 
 - Redraws only when something changes — no 60 fps of a motionless prompt.
 - 16 bytes per cell, 63 KB for a new tab, a 4 MB cap on each tab's history.
