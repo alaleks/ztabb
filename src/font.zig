@@ -105,18 +105,6 @@ pub fn indexOf(cp: u21) ?usize {
     for (data.ranges) |r| {
         if (cp >= r.lo and cp <= r.hi) return r.base + (cp - r.lo);
     }
-
-    // Agnoster uses these bent arrows for branches ahead of or behind their
-    // upstream. The baked face stops at U+21AF, so preserve their direction
-    // with the nearest covered arrows instead of showing a replacement box.
-    const fallback: u21 = switch (cp) {
-        0x21B0 => 0x2196,
-        0x21B1 => 0x2197,
-        else => return null,
-    };
-    for (data.ranges) |r| {
-        if (fallback >= r.lo and fallback <= r.hi) return r.base + (fallback - r.lo);
-    }
     return null;
 }
 
@@ -215,7 +203,8 @@ pub const BlankSet = struct {
 
 // -- atlas -----------------------------------------------------------------
 
-pub const atlas_cols: u32 = 32;
+// Wide enough that the tallest atlas stays well inside 8192px textures.
+pub const atlas_cols: u32 = 64;
 pub const atlas_rows: u32 = (glyph_count + atlas_cols - 1) / atlas_cols;
 
 pub fn atlasW(size: Size) u32 {
@@ -458,6 +447,15 @@ test "common status symbols are drawn" {
         0x1F916, // robot
         0x1F9E0, // brain
         0x1F9EA, // test tube
+        0x1F600, // grinning face
+        0x1F44D, // thumbs up
+        0x1F7E2, // green circle
+        0x1FAE0, // melting face
+        0x23FA, // record button
+        0x23BF, // bottom-left corner, Claude Code's result marker
+        0x20AC, // euro
+        0x03BB, // lambda
+        0xFFFD, // replacement character
     }) |cp| {
         try testing.expect(indexOf(cp) != null);
         for (0..section_count) |i| try testing.expect(!isBlank(cp, sectionAt(i)));
@@ -532,7 +530,7 @@ test "the blank set agrees with a direct scan" {
     for (0..section_count) |i| {
         const size = sectionAt(i);
         const set = BlankSet.build(size);
-        // Spot-check across the whole range rather than all 1067 at every size.
+        // Spot-check across the whole range rather than every glyph at every size.
         for ([_]u21{ ' ', 'A', 'g', 'Ж', 0x2588, 0x2500, 0xE0B0, 0xE0A5, 0x4E00 }) |cp| {
             try testing.expectEqual(isBlank(cp, size), set.has(cp));
         }
@@ -540,7 +538,7 @@ test "the blank set agrees with a direct scan" {
 }
 
 test "the blank set is small enough to keep beside each atlas" {
-    try testing.expect(@sizeOf(BlankSet) <= 256);
+    try testing.expect(@sizeOf(BlankSet) <= 1024);
 }
 
 test "space is blank and letters are not, in every section" {

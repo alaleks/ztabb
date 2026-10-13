@@ -767,6 +767,8 @@ pub const Terminal = struct {
     }
 
     pub fn putChar(self: *Terminal, ch: u21) void {
+        // shortcut: zero-width marks are dropped rather than combined into the previous cell.
+        if (zeroWidth(ch)) return;
         if (self.wrap_pending) {
             // The row ran out of columns rather than ending: mark it as
             // continuing before `newline` possibly retires it to history.
@@ -786,6 +788,26 @@ pub const Terminal = struct {
             self.cursor_col += 1;
         }
         self.dirty = true;
+    }
+
+    /// Codepoints that modify the character before them instead of taking a
+    /// cell: emoji presentation selectors (the U+FE0F in "✔️"), joiners, skin
+    /// tones, tag sequences and combining marks. Given a cell each, they would
+    /// draw as replacement boxes.
+    fn zeroWidth(cp: u21) bool {
+        return switch (cp) {
+            0x0300...0x036F, // combining diacritics
+            0x200B...0x200F, // zero-width space, joiners, direction marks
+            0x2060...0x2064, // word joiner, invisible operators
+            0x20D0...0x20FF, // combining marks for symbols (keycap U+20E3)
+            0xFE00...0xFE0F, // variation selectors
+            0xFEFF, // byte order mark
+            0x1F3FB...0x1F3FF, // emoji skin tones
+            0xE0000...0xE007F, // tags (subdivision flags)
+            0xE0100...0xE01EF, // variation selectors supplement
+            => true,
+            else => false,
+        };
     }
 
     fn backspace(self: *Terminal) void {
@@ -3218,4 +3240,12 @@ test "text is selectable on the alternate screen" {
     };
     var buf: [256]u8 = undefined;
     try testing.expectEqualStrings("hello\nworld", selectedText(&t, sel, &buf));
+}
+
+test "emoji selectors, joiners and skin tones take no cell" {
+    var t = try testTerm(8, 1);
+    defer t.deinit();
+    t.write("\u{2714}\u{FE0F}a\u{1F44D}\u{1F3FD}b\u{1F468}\u{200D}\u{1F4BB}");
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("\u{2714}a\u{1F44D}b\u{1F468}\u{1F4BB}", rowText(&t, 0, &buf));
 }

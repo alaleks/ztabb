@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>A fast, tiny terminal in one native process.</b><br>
-  Low idle CPU · about 10 MB on disk · no Electron, no SDL3 install.<br>
+  Low idle CPU · about 30 MB on disk · no Electron, no SDL3 install.<br>
   macOS · Linux · Windows
 </p>
 
@@ -65,7 +65,8 @@ Grab a file from the [latest release](https://github.com/alaleks/ztabb/releases/
 - **Light and dark themes** — switch live; text already on screen recolours.
   Every colour pair is WCAG-checked.
 - **JetBrains Mono built in** — with Powerline glyphs, so `agnoster` and
-  `powerlevel10k` work without a Nerd Font.
+  `powerlevel10k` work without a Nerd Font, plus emoji and common symbols
+  (shown in one monochrome cell).
 
 ## Why it is light
 
@@ -73,12 +74,13 @@ Measured on Apple Silicon against Tabby running alongside:
 
 |           | ztabb      | Tabby  |
 | --------- | ---------- | ------ |
-| Memory    | **110 MB** | 459 MB |
+| Memory    | **140 MB** | 459 MB |
 | Processes | **1**      | 5      |
-| On disk   | **≈10 MB** | 379 MB |
+| On disk   | **≈30 MB** | 379 MB |
 
-A rough comparison, not a benchmark. Most of the 110 MB is the SDL window and
-Metal renderer themselves (88 MB empty); ztabb's own share is about 23 MB.
+A rough comparison, not a benchmark. Most of the 140 MB is the SDL window and
+Metal renderer themselves (88 MB empty); ztabb's own share is about 52 MB,
+most of it the baked glyph atlases.
 
 - Redraws only when something changes — no 60 fps of a motionless prompt.
 - 16 bytes per cell, 63 KB for a new tab, a 4 MB cap on each tab's history.

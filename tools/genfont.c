@@ -83,32 +83,32 @@ typedef struct { unsigned int lo, hi; } Range;
 static const Range ranges[] = {
     {0x0020, 0x007E}, // ASCII printable
     {0x00A0, 0x00FF}, // Latin-1 supplement
+    {0x0100, 0x017F}, // Latin Extended-A
+    {0x0370, 0x03FF}, // Greek (lambda prompts)
     {0x0400, 0x045F}, // Cyrillic
-    {0x2010, 0x2027}, // dashes, quotes, bullet, ellipsis
-    {0x2190, 0x21AF}, // arrows
+    {0x2010, 0x205E}, // general punctuation: dashes, quotes, bullets, ‰ ‹ › ‼ ⁉
+    {0x20A0, 0x20C0}, // currency: € ₽ ₿
+    {0x2100, 0x21FF}, // letterlike (ℹ ™ №), number forms, arrows
+    {0x2200, 0x22FF}, // math operators
+    {0x2300, 0x23FF}, // misc technical: ⌘ ⌥ ⏎ ⎿ ⏳ ⏺
+    {0x2460, 0x24FF}, // enclosed alphanumerics
     {0x2500, 0x257F}, // box drawing
     {0x2580, 0x259F}, // block elements
     {0x25A0, 0x25FF}, // geometric shapes
     {0x2600, 0x27BF}, // misc symbols and dingbats (agnoster uses several)
+    {0x27F0, 0x27FF}, // supplemental arrows-A
     {0x2800, 0x28FF}, // Braille progress spinners (npm and other package managers)
+    {0x2900, 0x297F}, // supplemental arrows-B
+    {0x2B00, 0x2B59}, // misc symbols and arrows: ⬆ ⬛ ⭐ ⭕
     {0xE0A0, 0xE0B3}, // Powerline: branch, padlock, separators
     {0xF8FF, 0xF8FF}, // macOS Apple menu symbol
+    {0xFFFD, 0xFFFD}, // replacement character, for malformed UTF-8
     // shortcut: emoji occupy one monochrome cell; add wide cells when alignment or color matters.
-    {0x1F3AF, 0x1F3AF}, // target
-    {0x1F41B, 0x1F41B}, // bug
-    {0x1F440, 0x1F440}, // eyes
-    {0x1F4A1, 0x1F4A1}, // bulb
-    {0x1F4BB, 0x1F4BB}, // laptop
-    {0x1F4C1, 0x1F4C1}, // folder
-    {0x1F4CC, 0x1F4CC}, // pin
-    {0x1F4DD, 0x1F4DD}, // memo
-    {0x1F4E6, 0x1F4E6}, // package
-    {0x1F511, 0x1F512}, // key, lock
-    {0x1F525, 0x1F525}, // fire
-    {0x1F680, 0x1F680}, // rocket
-    {0x1F916, 0x1F916}, // robot
-    {0x1F9E0, 0x1F9E0}, // brain
-    {0x1F9EA, 0x1F9EA}, // test tube
+    {0x1F300, 0x1F64F}, // misc symbols and pictographs, emoticons
+    {0x1F680, 0x1F6FF}, // transport and map
+    {0x1F7E0, 0x1F7EB}, // coloured circles and squares: 🟢 🟡 🟥
+    {0x1F900, 0x1F9FF}, // supplemental symbols and pictographs
+    {0x1FA70, 0x1FAFF}, // symbols and pictographs extended-A
 };
 static const int nranges = sizeof(ranges) / sizeof(ranges[0]);
 
@@ -357,7 +357,13 @@ static int rasterize(CTFontRef font, unsigned int cp, int w, int h,
         owned = CTFontCreateForString(font, str, CFRangeMake(0, nchars));
         CFRelease(str);
         if (!owned) return 0;
-        if (!CTFontGetGlyphsForCharacters(owned, chars, glyphs, nchars) || glyphs[0] == 0) {
+        // LastResort draws its own "no glyph" box, the very square this table
+        // exists to avoid; a blank cell is the more honest answer.
+        CFStringRef ps = CTFontCopyPostScriptName(owned);
+        int last_resort = CFStringCompare(ps, CFSTR("LastResort"), 0) == kCFCompareEqualTo;
+        CFRelease(ps);
+        if (last_resort ||
+            !CTFontGetGlyphsForCharacters(owned, chars, glyphs, nchars) || glyphs[0] == 0) {
             CFRelease(owned);
             return 0;
         }
