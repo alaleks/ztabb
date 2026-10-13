@@ -45,9 +45,9 @@ pub const sections = [_]Section{
 };
 
 /// Terminal point sizes, smallest first; the middle one is the default.
-pub const term_points = [_]u32{ 11, 13, 16, };
+pub const term_points = [_]u32{ 11, 13, 16 };
 /// The interface size that goes with each terminal size.
-pub const ui_points = [_]u32{ 10, 11, 13, };
+pub const ui_points = [_]u32{ 10, 11, 13 };
 
 pub const Range = struct { lo: u21, hi: u21, base: u16 };
 

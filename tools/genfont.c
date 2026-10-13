@@ -554,11 +554,11 @@ int main(int argc, char **argv) {
     fprintf(out, "};\n\n");
     fprintf(out, "/// Terminal point sizes, smallest first; the middle one is the default.\n");
     fprintf(out, "pub const term_points = [_]u32{");
-    for (int i = 0; i < NTERM; i++) fprintf(out, " %d,", term_points[i]);
+    for (int i = 0; i < NTERM; i++) fprintf(out, "%s%d", i ? ", " : " ", term_points[i]);
     fprintf(out, " };\n");
     fprintf(out, "/// The interface size that goes with each terminal size.\n");
     fprintf(out, "pub const ui_points = [_]u32{");
-    for (int i = 0; i < NUI; i++) fprintf(out, " %d,", ui_points[i]);
+    for (int i = 0; i < NUI; i++) fprintf(out, "%s%d", i ? ", " : " ", ui_points[i]);
     fprintf(out, " };\n\n");
     fprintf(out, "pub const Range = struct { lo: u21, hi: u21, base: u16 };\n\n");
     fprintf(out, "pub const ranges = [_]Range{\n");
